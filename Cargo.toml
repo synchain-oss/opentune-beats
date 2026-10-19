@@ -1,0 +1,32 @@
+[package]
+name = "opentune-beats"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.99"
+license = "MIT"
+description = "Beat, downbeat and tempo-map analysis for backing tracks"
+repository = "https://github.com/synchain-oss/opentune-beats"
+homepage = "https://github.com/synchain-oss/opentune-beats"
+readme = "README.md"
+authors = ["Synchain"]
+# A command-line tool, not a library: it is distributed as a release binary, never from
+# crates.io. `cargo publish` refuses to run with this set.
+publish = false
+
+[[bin]]
+name = "opentune-beats"
+path = "src/main.rs"
+
+# No dependencies yet. The beat tracker (beat-this-rs and its ONNX runtime) is added together
+# with the analysis engine; every crate added must be MIT / Apache-2.0 / BSD / ISC / Zlib /
+# Unicode licensed (deny.toml enforces the list).
+[dependencies]
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+
+[lints.rust]
+# The audio and JSON paths handle untrusted input. Any unsafe block needs a review and an
+# explicit exception, so the compiler rejects one that slips in.
+unsafe_code = "forbid"

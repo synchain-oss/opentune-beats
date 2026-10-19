@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Synchain
+# SPDX-License-Identifier: MIT
+#
+# One grouped pull request per ecosystem per month, opened against dev. Dependency upgrades are
+# merged only after the maintainer has reviewed them; security updates are opened separately by
+# the repository's Dependabot security updates setting.
+#
+# Every action in .github/workflows/ is pinned to a 40-character SHA with the version in a
+# trailing comment, and Dependabot updates the comment together with the SHA.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 1
+    groups:
+      github-actions:
+        patterns: ["*"]
+    labels: ["type/deps"]
+    commit-message:
+      prefix: ci
+      include: scope
+
+  # Cargo.lock is committed, so an upgrade changes the lockfile only. A crate bump can change the
+  # license set, which the `licenses` job of ci.yml re-checks on the pull request.
+  - package-ecosystem: cargo
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 1
+    groups:
+      cargo:
+        patterns: ["*"]
+    labels: ["type/deps"]
+    commit-message:
+      prefix: chore
+      include: scope

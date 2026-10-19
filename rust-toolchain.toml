@@ -1,0 +1,6 @@
+# Toolchain pin. CI installs exactly this version with rustup, so a local build and a CI
+# build use the same compiler. Bump it together with `rust-version` in Cargo.toml.
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
+components = ["clippy", "rustfmt"]

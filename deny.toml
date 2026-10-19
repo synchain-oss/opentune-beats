@@ -1,0 +1,65 @@
+# cargo-deny policy: every crate compiled into the binary must be permissively licensed, come
+# from crates.io, and carry no known vulnerability. Run by the `licenses` job of ci.yml as
+# `cargo deny --locked check licenses bans sources advisories`.
+#
+# Adding a license to `allow` is a licensing decision: only permissive licenses (MIT, Apache-2.0,
+# BSD, ISC, Zlib, Unicode and equivalents) belong here. GPL, LGPL and AGPL crates are never
+# allowed, and neither are crates that ship no license at all.
+
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+
+[advisories]
+# A yanked or unmaintained crate in the graph is a warning to act on, not something to ignore
+# silently. `unsound` applies to the crates this binary actually compiles.
+yanked = "warn"
+unmaintained = "workspace"
+unsound = "workspace"
+
+[licenses]
+# License texts are matched with a confidence score; below this the crate counts as unlicensed.
+confidence-threshold = 0.93
+# The allow list is intentionally broader than the current dependency graph, so that adding a
+# permissively licensed crate does not require touching this file. Report, do not fail, on
+# entries no crate uses.
+unused-allowed-license = "allow"
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "0BSD",
+    "BSL-1.0",
+    "Unlicense",
+]
+
+[bans]
+# A wildcard version requirement ("*", "1.*") hides which release is built.
+wildcards = "deny"
+# Two versions of the same crate usually mean an outdated dependency somewhere. Warn rather
+# than fail: the analysis engine will pull in a large tree, and a duplicate is not by itself a
+# defect. Add a `skip` entry with a reason when a duplicate cannot be removed.
+multiple-versions = "warn"
+# Crates that must never enter the graph. `openssl` is replaced by `rustls`; the ONNX runtime is
+# linked from a pinned, checksummed artifact instead of a build-time downloader.
+deny = [
+    { crate = "openssl", use-instead = "rustls" },
+    { crate = "openssl-sys", use-instead = "rustls" },
+]
+
+[sources]
+# Everything comes from crates.io: no git dependencies, no alternative registries.
+unknown-registry = "deny"
+unknown-git = "deny"

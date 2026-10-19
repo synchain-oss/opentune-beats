@@ -1,0 +1,74 @@
+{
+  "$comment": "Pinned binary tools. scripts/fetch-tool.mjs (and CI) read versions and sha256 from this file only; asset names use the {version}, {triple} and {ext} placeholders so each value is written once. sha256 values come from the release's official checksums file.",
+  "gitleaks": {
+    "version": "8.30.1",
+    "url": "https://github.com/gitleaks/gitleaks/releases/download/v{version}/{asset}",
+    "member": "gitleaks{ext}",
+    "binary": "gitleaks",
+    "assets": {
+      "darwin-arm64": {
+        "triple": "darwin_arm64",
+        "asset": "gitleaks_{version}_{triple}.tar.gz",
+        "sha256": "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5"
+      },
+      "darwin-x64": {
+        "triple": "darwin_x64",
+        "asset": "gitleaks_{version}_{triple}.tar.gz",
+        "sha256": "dfe101a4db2255fc85120ac7f3d25e4342c3c20cf749f2c20a18081af1952709"
+      },
+      "linux-arm64": {
+        "triple": "linux_arm64",
+        "asset": "gitleaks_{version}_{triple}.tar.gz",
+        "sha256": "e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080"
+      },
+      "linux-x64": {
+        "triple": "linux_x64",
+        "asset": "gitleaks_{version}_{triple}.tar.gz",
+        "sha256": "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+      },
+      "win32-arm64": {
+        "triple": "windows_arm64",
+        "asset": "gitleaks_{version}_{triple}.zip",
+        "sha256": "b95f5e4f5c425cedca7ee203d9afd29597e692c4924a12ed42f970537c72cc0f"
+      },
+      "win32-x64": {
+        "triple": "windows_x64",
+        "asset": "gitleaks_{version}_{triple}.zip",
+        "sha256": "d29144deff3a68aa93ced33dddf84b7fdc26070add4aa0f4513094c8332afc4e"
+      }
+    }
+  },
+  "cargo-deny": {
+    "version": "0.20.2",
+    "url": "https://github.com/EmbarkStudios/cargo-deny/releases/download/{version}/{asset}",
+    "member": "cargo-deny-{version}-{triple}/cargo-deny{ext}",
+    "binary": "cargo-deny",
+    "assets": {
+      "darwin-arm64": {
+        "triple": "aarch64-apple-darwin",
+        "asset": "cargo-deny-{version}-{triple}.tar.gz",
+        "sha256": "fe67d82a10d8597a3549364cb733a3f9cc1bfff9031b7ae46384a9f2a72090c3"
+      },
+      "darwin-x64": {
+        "triple": "x86_64-apple-darwin",
+        "asset": "cargo-deny-{version}-{triple}.tar.gz",
+        "sha256": "248da7f581724e470071990c088ffc55c811981715f4cbdb258621fb79f8b7a6"
+      },
+      "linux-arm64": {
+        "triple": "aarch64-unknown-linux-musl",
+        "asset": "cargo-deny-{version}-{triple}.tar.gz",
+        "sha256": "995c82be0defc7a025cae49a2aa2644ce8245c9a3318fc4103907c6a285e8c7d"
+      },
+      "linux-x64": {
+        "triple": "x86_64-unknown-linux-musl",
+        "asset": "cargo-deny-{version}-{triple}.tar.gz",
+        "sha256": "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
+      },
+      "win32-x64": {
+        "triple": "x86_64-pc-windows-msvc",
+        "asset": "cargo-deny-{version}-{triple}.tar.gz",
+        "sha256": "975a22143262fd27476d19ee00c7af67978426e40e1dee94eed6bbade1cf87dc"
+      }
+    }
+  }
+}

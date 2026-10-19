@@ -1,0 +1,285 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Synchain
+# SPDX-License-Identifier: MIT
+name: CI
+
+# Build, test and compliance checks for the CLI.
+#
+# Triggers: a pull request into dev / prod / feature/**, a push to dev or feature/**, and a manual
+# run on any branch. Every job runs on every trigger: the suite is small (one crate, two targets)
+# and a check that only runs on some branches is a check that surprises you on the merge.
+#
+# The single required check is `beats-gate`: it fails when any job below fails, was cancelled or
+# never ran. A required check must not be filtered by paths, and must not be skipped, so
+# `beats-gate` runs with `if: always()` and only inspects the results of its `needs`.
+#
+# This workflow reads no secret, so a pull request from a fork (once a maintainer approves the
+# run) executes exactly the same checks.
+on:
+  pull_request:
+    branches: [dev, prod, "feature/**"]
+    # `edited` covers a changed base (a sub-pull-request retargeted at dev) and an edited title or
+    # body: both change what the attribution check sees on the same commit.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+  push:
+    branches: [dev, "feature/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One group per pull request, so a new push cancels the run it supersedes. A push is grouped by
+# commit: grouping by branch would let a newer queued run replace an older one, and the commit in
+# between would then never have been checked.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || format('{0}@{1}', github.ref, github.sha) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    # Explicit bash: on Windows this is the only way to get -eo pipefail, so a failure inside a
+    # pipeline is not swallowed.
+    shell: bash
+
+jobs:
+  compliance:
+    name: compliance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # The commit checks read this branch's own commits and need origin/<base>, so the full
+      # history is fetched. A pull request is checked at its head, not at the test merge commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      # The attribution checker and its pattern list are byte-identical copies of the
+      # maintainer's canonical files; the pinned digests detect any local edit.
+      - name: Attribution checker matches its pinned sha256
+        run: node scripts/ci-checks.mjs pins
+      - name: Commit range and identity rules
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+          REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REPO: ${{ github.repository }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_REF: ${{ github.head_ref }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: node scripts/ci-checks.mjs scope >> "$GITHUB_OUTPUT"
+      # Each check runs even when an earlier one failed, so one run reports every problem.
+      - name: Commits (DCO, attribution, identity)
+        if: ${{ !cancelled() }}
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+          REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REPO: ${{ github.repository }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_REF: ${{ github.head_ref }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: node scripts/ci-checks.mjs commits
+      - name: Files carry no AI attribution
+        if: ${{ !cancelled() }}
+        run: node scripts/ci-checks.mjs files
+      - name: No personal paths or e-mail addresses
+        if: ${{ !cancelled() }}
+        run: node scripts/ci-checks.mjs privacy
+      - name: No audio or model files
+        if: ${{ !cancelled() }}
+        run: node scripts/ci-checks.mjs assets
+      - name: No pull_request_target
+        if: ${{ !cancelled() }}
+        run: node scripts/ci-checks.mjs pull-request-target
+      # PR titles and bodies are untrusted text: they reach the checker through `env:`, never by
+      # expanding `${{ }}` inside the script.
+      - name: PR title and body carry no AI attribution
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: printf '%s\n\n%s\n' "$PR_TITLE" "$PR_BODY" | node scripts/check-attribution.mjs -
+      # gitleaks is downloaded from its pinned release and verified against the sha256 in
+      # scripts/tools.lock.json before it runs. The working tree is scanned from an export of the
+      # commit, so the scan sees exactly the tracked files and nothing the job wrote (the tool
+      # cache, the target directory).
+      - name: gitleaks (tracked files and branch commits)
+        if: ${{ !cancelled() }}
+        env:
+          BASE: ${{ steps.scope.outputs.base }}
+        run: |
+          tool=$(node scripts/fetch-tool.mjs gitleaks)
+          "$tool" version
+          tree="$RUNNER_TEMP/tree"
+          mkdir -p "$tree"
+          git archive --format=tar HEAD | tar -x -C "$tree"
+          "$tool" dir "$tree" --no-banner --no-color --redact --exit-code 1
+          # A scope step that failed leaves BASE empty; scanning the whole history then reports the
+          # leaks it finds, and the job is already failing on the scope step.
+          if [ -n "$BASE" ]; then range="--log-opts $BASE..HEAD"; else range=""; fi
+          "$tool" git . --no-banner --no-color --redact --exit-code 1 $range
+
+  rust:
+    name: rust (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+            artifact: opentune-beats-windows-x64
+            binary: target/opentune-beats.exe
+          - name: macos-universal2
+            os: macos-latest
+            artifact: opentune-beats-macos-universal2
+            binary: target/opentune-beats
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The runner's rustup installs exactly the pinned toolchain, with the components the
+      # checks below need. `--no-self-update` keeps the runner's own rustup untouched.
+      - name: Install the pinned Rust toolchain
+        shell: bash
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --component rustfmt --component clippy --no-self-update
+          rustup default "$channel"
+          rustc --version
+          cargo --version
+      # Cargo's registry cache is keyed by Cargo.lock: a new dependency invalidates it, a rebuild
+      # of the same tree reuses it.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-registry-${{ runner.os }}-
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: cargo-target-${{ runner.os }}-${{ matrix.name }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('src/**') }}
+          restore-keys: cargo-target-${{ runner.os }}-${{ matrix.name }}-
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+      - name: cargo clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: cargo test
+        run: cargo test --locked
+      # macOS: build both architectures and combine them into one universal binary.
+      - name: Build (macOS universal2)
+        if: matrix.name == 'macos-universal2'
+        shell: bash
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+          lipo -create -output target/opentune-beats \
+            target/aarch64-apple-darwin/release/opentune-beats \
+            target/x86_64-apple-darwin/release/opentune-beats
+          lipo -info target/opentune-beats
+      # Windows: the target is named explicitly, because `.cargo/config.toml` sets the static CRT
+      # for `x86_64-pc-windows-msvc` and cargo only applies a target's rustflags when that target
+      # is passed on the command line.
+      - name: Build (Windows, static CRT)
+        if: matrix.name == 'windows-x64'
+        shell: bash
+        run: |
+          cargo build --release --locked --target x86_64-pc-windows-msvc
+          cp target/x86_64-pc-windows-msvc/release/opentune-beats.exe target/opentune-beats.exe
+      # The binary must run on a bare runner: it is what a user downloads.
+      - name: Smoke test the release binary
+        shell: bash
+        run: |
+          "${{ matrix.binary }}" --version
+          "${{ matrix.binary }}" version --json
+      - name: SHA-256 of the binary
+        shell: bash
+        run: |
+          if command -v sha256sum >/dev/null; then
+            sha256sum "${{ matrix.binary }}" | tee "${{ matrix.binary }}.sha256"
+          else
+            shasum -a 256 "${{ matrix.binary }}" | tee "${{ matrix.binary }}.sha256"
+          fi
+      # Short retention: these artifacts are for inspecting a failing run, not a release.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.binary }}
+            ${{ matrix.binary }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  licenses:
+    name: licenses
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Install the pinned Rust toolchain
+        shell: bash
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --no-self-update
+          rustup default "$channel"
+      # cargo-deny is a prebuilt binary, downloaded and verified against scripts/tools.lock.json;
+      # it is never `cargo install`ed, which would compile an unpinned dependency tree.
+      - name: cargo deny (licenses, bans, sources, advisories)
+        shell: bash
+        run: |
+          tool=$(node scripts/fetch-tool.mjs cargo-deny)
+          "$tool" --version
+          "$tool" --locked check licenses bans sources advisories
+
+  # The only required check. Every job above must have succeeded; a skipped or cancelled job is a
+  # failure here, so a required check can never pass because a job silently did not run.
+  beats-gate:
+    name: beats-gate
+    needs: [compliance, rust, licenses]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          status=0
+          for job in compliance rust licenses; do
+            result=$(jq -r --arg job "$job" '.[$job].result // "missing"' <<< "$NEEDS")
+            echo "$job: $result"
+            if [ "$result" != success ]; then
+              echo "::error::$job: $result (must succeed)"
+              status=1
+            fi
+          done
+          # A job added to `needs` but not to the list above would otherwise never be checked.
+          listed=" compliance rust licenses "
+          for job in $(jq -r 'keys[]' <<< "$NEEDS"); do
+            case "$listed" in
+              *" $job "*) ;;
+              *)
+                echo "::error::$job is in needs but not in the list this gate checks"
+                status=1
+                ;;
+            esac
+          done
+          exit "$status"
