@@ -418,14 +418,21 @@ function checkCommits(commits, { allowExternalAuthors = false, allowDependabot =
     const short = commit.sha.slice(0, 8);
     const isMerge = commit.parents.length > 1;
     const projectAuthor = PROJECT_EMAILS.includes(commit.email.toLowerCase());
+    const webMergeAuthor = commit.email.toLowerCase() === MAINTAINER_GITHUB_NOREPLY;
     const externalAuthor = !projectAuthor && allowExternalAuthors && !isMaintainerName(commit.name);
 
     // A merge commit has no sign-off of its own (GitHub's web merge writes none); everything
     // else carries the DCO trailer of its author, or of the maintainer for a project commit.
+    // A squash merge made on GitHub is authored by the maintainer's GitHub noreply address but
+    // carries the maintainer's project sign-off from the merge message.
     const result = checkText(commit.body, {
       patterns,
       requireSignoff: !isMerge,
-      signoffEmails: isMerge ? null : projectAuthor ? [...PROJECT_EMAILS] : [commit.email],
+      signoffEmails: isMerge
+        ? null
+        : projectAuthor || webMergeAuthor
+          ? [...PROJECT_EMAILS]
+          : [commit.email],
       source: `commit ${short}`,
     });
     problems.push(...result.violations.map((v) => `commit ${short}: [${v.rule}] ${v.text}`));
