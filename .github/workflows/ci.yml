@@ -96,7 +96,7 @@ jobs:
       - name: No audio or model files
         if: ${{ !cancelled() }}
         run: node scripts/ci-checks.mjs assets
-      - name: No pull_request_target
+      - name: No pull-request-target trigger
         if: ${{ !cancelled() }}
         run: node scripts/ci-checks.mjs pull-request-target
       # PR titles and bodies are untrusted text: they reach the checker through `env:`, never by
@@ -190,9 +190,9 @@ jobs:
             target/aarch64-apple-darwin/release/opentune-beats \
             target/x86_64-apple-darwin/release/opentune-beats
           lipo -info target/opentune-beats
-      # Windows: the target is named explicitly, because `.cargo/config.toml` sets the static CRT
-      # for `x86_64-pc-windows-msvc` and cargo only applies a target's rustflags when that target
-      # is passed on the command line.
+      # Windows: the target is named explicitly so that build scripts and proc-macros are built
+      # for the host without `+crt-static`; only the final binary gets the static CRT from
+      # `.cargo/config.toml`.
       - name: Build (Windows, static CRT)
         if: matrix.name == 'windows-x64'
         shell: bash
@@ -204,7 +204,12 @@ jobs:
         shell: bash
         run: |
           "${{ matrix.binary }}" --version
-          "${{ matrix.binary }}" version --json
+          "${{ matrix.binary }}" version --json | jq -e '
+            .name == "opentune-beats"
+            and .schemaVersion == 1
+            and (.beatThis != null)
+            and ((.models | keys) == ["final", "mel", "small"])
+            and all(.models[]; (.file | type) == "string" and (.sha256 | length) == 64)'
       - name: SHA-256 of the binary
         shell: bash
         run: |
@@ -249,11 +254,57 @@ jobs:
           "$tool" --version
           "$tool" --locked check licenses bans sources advisories
 
+  # The synthetic acceptance check: the beat grid is compared with the tempo map the audio was
+  # rendered from. The audio is generated on the runner and never committed; the model files are
+  # fetched from their pinned URLs and verified against the SHA-256 in the binary.
+  accuracy:
+    name: accuracy (synthetic)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Install the pinned Rust toolchain
+        shell: bash
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --no-self-update
+          rustup default "$channel"
+      # The final model is about 83 MB: a cache hit keeps the job short. The key is that model's
+      # SHA-256, so a new pin starts a new cache instead of reusing the old file.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: models
+          key: models-5f810debe53459b559127fb55bbad40035bb47cc567b20e501670f968c770f02
+      - name: Fetch the pinned models
+        shell: bash
+        run: node scripts/fetch-models.mjs --dir models --model final
+      - name: Build the release binary
+        shell: bash
+        run: cargo build --release --locked
+      - name: Render the synthetic backing track
+        shell: bash
+        run: node bench/gen.mjs --out "$RUNNER_TEMP/bench.wav"
+      - name: Analyze it
+        shell: bash
+        run: >-
+          ./target/release/opentune-beats analyze "$RUNNER_TEMP/bench.wav" --models-dir models
+          > "$RUNNER_TEMP/analysis.json"
+      # Fails the job when the median error is above 5 ms, the p95 above 15 ms or the +/-70 ms
+      # F-measure below 0.95, and writes the numbers to the run summary either way.
+      - name: Score against the tempo map
+        shell: bash
+        run: node bench/score.mjs --analysis "$RUNNER_TEMP/analysis.json" --summary "$GITHUB_STEP_SUMMARY"
+
   # The only required check. Every job above must have succeeded; a skipped or cancelled job is a
   # failure here, so a required check can never pass because a job silently did not run.
   beats-gate:
     name: beats-gate
-    needs: [compliance, rust, licenses]
+    needs: [compliance, rust, licenses, accuracy]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -263,7 +314,7 @@ jobs:
           NEEDS: ${{ toJSON(needs) }}
         run: |
           status=0
-          for job in compliance rust licenses; do
+          for job in compliance rust licenses accuracy; do
             result=$(jq -r --arg job "$job" '.[$job].result // "missing"' <<< "$NEEDS")
             echo "$job: $result"
             if [ "$result" != success ]; then
@@ -272,7 +323,7 @@ jobs:
             fi
           done
           # A job added to `needs` but not to the list above would otherwise never be checked.
-          listed=" compliance rust licenses "
+          listed=" compliance rust licenses accuracy "
           for job in $(jq -r 'keys[]' <<< "$NEEDS"); do
             case "$listed" in
               *" $job "*) ;;
