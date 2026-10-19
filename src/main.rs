@@ -126,7 +126,9 @@ fn is_echoable_option(arg: &str) -> bool {
     if bytes.is_empty() || bytes.len() > 32 || !bytes[0].is_ascii_alphanumeric() {
         return false;
     }
-    bytes[1..].iter().all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+    bytes[1..]
+        .iter()
+        .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
 }
 
 fn parse(args: &[OsString]) -> Result<Command, UsageError> {

@@ -11,9 +11,10 @@ Rules that apply to every change here:
 - **Warning and error codes are only added.** A reader must accept a code it does not know.
 - **Times are seconds** from the start of the input file and are written with 4 decimal places.
   A field whose name ends in `Ms` is in milliseconds.
-- **stdout carries exactly one JSON object.** Logs and progress go to stderr. A failure still
-  writes one JSON object to stdout, so a caller parses stdout the same way whether the run
-  succeeded or not.
+- **`analyze` and `version --json` write exactly one JSON object to stdout.** Logs and progress
+  go to stderr. A failure, including a usage error, still writes one JSON object to stdout, so a
+  caller parses stdout the same way whether the run succeeded or not. `version` and `--version`
+  print one line of text; `--help` writes only to stderr (section 1).
 
 ## 1. Commands
 
@@ -30,6 +31,7 @@ opentune-beats --version
 | `version` | One line: `opentune-beats <version> (beat-this <crate version>)`; this build prints the line without the `beat-this` suffix until the engine is linked (section 6) |
 | `version --json` | The version JSON of section 4 |
 | `--version` | The same one line as `version` |
+| `--help`, `-h`, `help` | The usage text on stderr; stdout stays empty; exit code 0 |
 
 `analyze` options:
 
@@ -141,7 +143,9 @@ On any non-zero exit, stdout still carries one JSON object:
 
 `detail` is a human-readable sentence. It never repeats a value the user typed — not a path, a
 file name, an unknown command or an option value — and it never contains a credential; the full
-value is written to stderr instead. A caller branches on `code`, not on the text.
+value is written to stderr instead. The one exception is the name of an unknown option when it
+is a plain option name (`-x` or `--name`, ASCII letters, digits and `-`, at most 32 characters
+after the dashes), as in `unknown option: --bogus`. A caller branches on `code`, not on the text.
 
 ## 4. Version JSON
 
