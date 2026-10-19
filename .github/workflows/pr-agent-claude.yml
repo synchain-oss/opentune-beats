@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Synchain
+# SPDX-License-Identifier: MIT
+name: PR Agent (Claude Haiku)
+
+# The second pr-agent, for cross-checking the review of the first one. Claude Haiku 5.5 on Claude
+# API credit, billed per call.
+#
+# It runs on every base branch and again on every push, so a sub-pull-request into feature/v1 gets
+# a review as well. Draft, fork and bot pull requests are skipped by the central workflow.
+#
+# On a pull request into dev the primary reviewer is the OpenCode Go pr-agent (pr-agent.yml); there
+# this run skips /describe and posts review / improve as new comments, because two pr-agents share
+# one comment identity and would overwrite each other's description and comments. On every other
+# base describe / review / improve all run.
+#
+# No workflow in this repository uses pull_request_target.
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+
+permissions: {}
+
+jobs:
+  pr-agent-claude:
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    uses: Synchain-oss/ci-workflows/.github/workflows/pr-agent.yml@8028e34628bc2276ca978d87ccfc364432742820 # v1.3.1
+    with:
+      provider: anthropic
+      base_branches: '["*"]'
+      secondary_on_bases: '["dev"]'
+      # Keep this list identical to pr-agent.yml: the two runs must look at the same files.
+      # Cargo.lock is generated, the bench annotations are data, and docs/ is prose. The output
+      # contract (docs/output.md) is deliberately not ignored: it is the review focus.
+      ignore_globs: '["Cargo.lock", "**/*.lock", "bench/**", "LICENSES/**", "THIRD-PARTY-NOTICES*"]'
+    secrets:
+      api_key: ${{ secrets.CLAUDE_API_KEY_FOR_PR_REVIEW }}

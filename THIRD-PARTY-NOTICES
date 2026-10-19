@@ -1,0 +1,14 @@
+OpenTune Beats — third-party notices
+
+This file lists the third-party Rust crates compiled into the binary, with their licenses. It is
+kept in the repository and ships next to the executable in the release archive, so that a binary
+distribution carries the notices it is required to carry.
+
+Current state (0.1.0)
+
+  No third-party crate is compiled into this build: the binary contains only the code in this
+  repository. Once the analysis engine adds dependencies, a generator reads Cargo.lock and writes
+  this file; until then it is maintained by hand, and the list above is exact.
+
+The Beat This! model weights and the beat-this-rs port are described in NOTICE. They belong to a
+later build of the analysis engine and are not part of the current binary.
