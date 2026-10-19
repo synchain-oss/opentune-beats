@@ -127,7 +127,7 @@ the self-check a caller runs after installing the binary.
 | Exit code | Meaning |
 | --- | --- |
 | 0 | Success |
-| 2 | Usage error: unknown command or option, a missing or invalid value |
+| 2 | Usage error (`USAGE`): unknown command or option, a missing or invalid value |
 | 3 | A model file is missing (`MODEL_MISSING`) or its SHA-256 does not match (`MODEL_CHECKSUM`) |
 | 4 | The input cannot be read or decoded (`INPUT_UNREADABLE`), or is too short to analyse (`INPUT_TOO_SHORT`) |
 | 5 | Analysis failed for any other reason (`ANALYSIS_FAILED`) |
