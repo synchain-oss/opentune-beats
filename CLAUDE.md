@@ -29,5 +29,5 @@
 
 ## 4. 本地与 CI
 
-- 维护者本机没有 Rust 工具链，也不安装：构建与测试只在 CI 上做（推 `feat/*` 分支或开 PR 触发）。
+- 本机先跑 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`，再推 `feat/*` 分支；以 CI 为准（macOS universal2 只在 CI 上编）。
 - CI：Windows x64（MSVC，静态 CRT `/MT`）与 macOS universal2；`cargo fmt --check`、`cargo clippy -D warnings`、`cargo test`、基准精度检查、许可检查（`cargo deny`）。

@@ -628,14 +628,19 @@ const CHECKS = {
 
   'pull-request-target'() {
     const dir = path.join(ROOT, '.github', 'workflows');
-    const re = /^[ \t\r\n\v\f]*pull_request_target:|^[ \t\r\n\v\f]*on:.*pull_request_target|^[ \t\r\n\v\f]*-[ \t\r\n\v\f]*pull_request_target/;
+    // A whole-line test after the YAML comment is removed: the name as a bare or quoted token
+    // that ends a key (`pull_request_target:`), a scalar, a sequence item or a flow-sequence
+    // element (`on: [push, pull_request_target]`). Prose that merely mentions the name (a review
+    // prompt that forbids it) is followed by other text and does not match.
+    const re = /(^|[\s[,{'"])pull_request_target(['"]?\s*([:,\]}]|$))/;
     const problems = [];
     let scanned = 0;
     for (const name of fs.readdirSync(dir).filter((n) => /\.ya?ml$/.test(n))) {
       const text = fs.readFileSync(path.join(dir, name), 'utf8');
       scanned += 1;
       text.split('\n').forEach((line, i) => {
-        if (re.test(line)) problems.push(`.github/workflows/${name}:${i + 1}: ${line.trim()}`);
+        const code = line.replace(/(^|\s)#.*$/, '');
+        if (re.test(code)) problems.push(`.github/workflows/${name}:${i + 1}: ${line.trim()}`);
       });
     }
     return report('pull_request_target', problems, `${scanned} workflow file(s): no pull_request_target`);

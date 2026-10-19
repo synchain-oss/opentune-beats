@@ -1,28 +1,36 @@
 //! Beat, downbeat and tempo-map analysis for backing tracks.
 //!
-//! This is the first, deliberately small build: the command-line surface and the JSON envelope
-//! described in `docs/output.md` exist, but the beat tracker is not linked yet, so `analyze`
-//! reports `ANALYSIS_FAILED` instead of a beat grid.
+//! The command-line surface and the JSON envelope are described in `docs/output.md`; the analysis
+//! itself is the beat-this model plus the post-processing in `post`.
+
+mod analyze;
+mod json;
+mod models;
+mod onset;
+mod output;
+mod post;
+mod sha256;
+mod stats;
+mod wav;
 
 use std::ffi::OsString;
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
+use analyze::Model;
+
 /// Product name, as it appears in `--version` and in the JSON envelope.
-const NAME: &str = "opentune-beats";
+pub(crate) const NAME: &str = "opentune-beats";
 /// Crate version, taken from `Cargo.toml`.
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Contract version of the JSON envelope (`docs/output.md`).
-const SCHEMA_VERSION: u32 = 1;
+pub(crate) const SCHEMA_VERSION: u32 = 1;
 
 const EXIT_OK: u8 = 0;
 const EXIT_USAGE: u8 = 2;
-const EXIT_ANALYSIS_FAILED: u8 = 5;
-
-/// The `detail` of `ANALYSIS_FAILED`. It is deliberately static: stdout never carries a value the
-/// user typed, because a caller may log or forward it (`docs/output.md`). The values of the run
-/// are written to stderr instead.
-const ANALYZE_NOT_IMPLEMENTED: &str = "beat tracking is not implemented yet";
+/// The exit code of an `analyze` run whose result cannot be written to stdout.
+const EXIT_ANALYSIS_FAILURE: u8 = 5;
 
 const USAGE: &str = "\
 usage:
@@ -31,28 +39,15 @@ usage:
   opentune-beats version [--json]
   opentune-beats --version
 
+--models-dir defaults to <directory of the executable>/models.
 Exit codes: 0 success, 2 usage error, 3 model missing or checksum mismatch,
 4 input unreadable, 5 analysis failed. The JSON contract is in docs/output.md.";
 
 #[derive(Debug, PartialEq, Eq)]
-enum Model {
-    Final,
-    Small,
-}
-
-impl Model {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Model::Final => "final",
-            Model::Small => "small",
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
 struct AnalyzeOptions {
-    input: String,
+    input: PathBuf,
     model: Model,
+    models_dir: Option<PathBuf>,
     pretty: bool,
     refine: bool,
     min_segment_beats: u32,
@@ -176,8 +171,9 @@ fn parse_version(args: &[OsString]) -> Result<Command, UsageError> {
 }
 
 fn parse_analyze(args: &[OsString]) -> Result<Command, UsageError> {
-    let mut input: Option<String> = None;
+    let mut input: Option<PathBuf> = None;
     let mut model = Model::Final;
+    let mut models_dir: Option<PathBuf> = None;
     let mut pretty = false;
     let mut refine = true;
     let mut min_segment_beats: u32 = 8;
@@ -199,11 +195,11 @@ fn parse_analyze(args: &[OsString]) -> Result<Command, UsageError> {
             }
         } else if arg == "--models-dir" {
             index += 1;
-            // Only validated here; the model loader reads the directory once the engine lands.
             let value = value_at(args, index, "--models-dir")?;
             if value.trim().is_empty() {
                 return Err(UsageError::plain("--models-dir must not be blank"));
             }
+            models_dir = Some(PathBuf::from(&args[index]));
         } else if arg == "--min-segment-beats" {
             index += 1;
             let value = value_at(args, index, "--min-segment-beats")?;
@@ -224,7 +220,7 @@ fn parse_analyze(args: &[OsString]) -> Result<Command, UsageError> {
         } else if input.is_some() {
             return Err(value_error("only one input file may be given", &arg));
         } else {
-            input = Some(arg);
+            input = Some(PathBuf::from(&args[index]));
         }
         index += 1;
     }
@@ -236,6 +232,7 @@ fn parse_analyze(args: &[OsString]) -> Result<Command, UsageError> {
     Ok(Command::Analyze(AnalyzeOptions {
         input,
         model,
+        models_dir,
         pretty,
         refine,
         min_segment_beats,
@@ -249,22 +246,20 @@ fn value_at(args: &[OsString], index: usize, name: &str) -> Result<String, Usage
     }
 }
 
-/// The one line `--version` and `version` print. The `(beat-this <version>)` suffix of the
-/// contract is added together with the engine dependency; see `docs/output.md`.
+/// The one line `--version` and `version` print.
 fn version_line() -> String {
-    format!("{name} {version}\n", name = NAME, version = VERSION)
+    format!(
+        "{name} {version} (beat-this {engine})\n",
+        name = NAME,
+        version = VERSION,
+        engine = models::BEAT_THIS_VERSION,
+    )
 }
 
 fn version_json() -> String {
-    let schema = SCHEMA_VERSION.to_string();
-    let mut out = String::from("{\"name\":\"");
-    out.push_str(NAME);
-    out.push_str("\",\"version\":\"");
-    out.push_str(VERSION);
-    out.push_str("\",\"beatThis\":null,\"schemaVersion\":");
-    out.push_str(&schema);
-    out.push_str(",\"models\":{}}\n");
-    out
+    let mut text = output::version_document().to_compact();
+    text.push('\n');
+    text
 }
 
 /// The one JSON object a failed run writes to stdout. It is assembled from short pieces so that
@@ -328,30 +323,44 @@ fn run<I: IntoIterator<Item = OsString>>(args: I) -> (u8, String, String) {
         Command::Help => (EXIT_OK, String::new(), format!("{usage}\n", usage = USAGE)),
         Command::VersionLine | Command::VersionText => (EXIT_OK, version_line(), String::new()),
         Command::VersionJson => (EXIT_OK, version_json(), String::new()),
-        Command::Analyze(options) => analyze(&options),
+        Command::Analyze(options) => run_analyze(&options),
     }
 }
 
-fn analyze(options: &AnalyzeOptions) -> (u8, String, String) {
-    let json = error_json("ANALYSIS_FAILED", ANALYZE_NOT_IMPLEMENTED, options.pretty);
-    let log = format!(
-        "{name}: not implemented: file={file} model={model} refine={refine} min_beats={beats}\n",
-        name = NAME,
-        file = options.input.as_str(),
-        model = options.model.as_str(),
-        refine = if options.refine { "on" } else { "off" },
-        beats = options.min_segment_beats,
-    );
-    (EXIT_ANALYSIS_FAILED, json, log)
+fn run_analyze(options: &AnalyzeOptions) -> (u8, String, String) {
+    let request = analyze::Request {
+        input: &options.input,
+        model: options.model,
+        models_dir: options.models_dir.as_deref(),
+        refine: options.refine,
+        min_segment_beats: options.min_segment_beats as usize,
+        pretty: options.pretty,
+    };
+    match analyze::run(&request) {
+        Ok(text) => (EXIT_OK, text, String::new()),
+        Err(failure) => {
+            let json = error_json(failure.code, &failure.detail, options.pretty);
+            let log = format!(
+                "{name}: {message}\n",
+                name = NAME,
+                message = failure.message
+            );
+            (failure.exit, json, log)
+        }
+    }
 }
 
 fn main() -> ExitCode {
-    let (code, stdout, stderr) = run(std::env::args_os().skip(1));
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let is_analyze = args.first().is_some_and(|arg| arg == "analyze");
+    let (code, stdout, stderr) = run(args);
     if !stdout.is_empty() {
         let mut out = io::stdout().lock();
         let wrote = out.write_all(stdout.as_bytes()).is_ok() && out.flush().is_ok();
-        if !wrote {
-            return ExitCode::from(EXIT_ANALYSIS_FAILED);
+        // Only an analysis whose result cannot be delivered is a failure; a closed pipe on
+        // `version` or a usage error keeps the exit code of the command itself.
+        if !wrote && is_analyze {
+            return ExitCode::from(EXIT_ANALYSIS_FAILURE);
         }
     }
     if !stderr.is_empty() {
@@ -377,14 +386,19 @@ mod tests {
         run(args)
     }
 
+    fn version_line_text() -> String {
+        format!(
+            "opentune-beats {} (beat-this {})\n",
+            env!("CARGO_PKG_VERSION"),
+            models::BEAT_THIS_VERSION
+        )
+    }
+
     #[test]
     fn version_flag_prints_one_line() {
         let (code, stdout, stderr) = run_args("--version");
         assert_eq!(code, EXIT_OK);
-        assert_eq!(
-            stdout,
-            format!("opentune-beats {}\n", env!("CARGO_PKG_VERSION"))
-        );
+        assert_eq!(stdout, version_line_text());
         assert!(stderr.is_empty());
     }
 
@@ -395,9 +409,10 @@ mod tests {
         assert_eq!(stdout.lines().count(), 1);
         assert!(stdout.starts_with("{\"name\":\"opentune-beats\","));
         assert!(stdout.contains(VERSION));
-        assert!(stdout.contains("\"beatThis\":null"));
+        assert!(stdout.contains("\"beatThis\":\"1.1.0\""));
         assert!(stdout.contains("\"schemaVersion\":1"));
-        assert!(stdout.ends_with(",\"models\":{}}\n"));
+        assert!(stdout.contains("\"models\":{\"final\""));
+        assert!(stdout.contains("\"mel\":{\"file\":\"mel_spectrogram.onnx\""));
         assert!(stderr.is_empty());
     }
 
@@ -405,10 +420,7 @@ mod tests {
     fn version_without_json_prints_the_version_line() {
         let (code, stdout, _) = run_args("version");
         assert_eq!(code, EXIT_OK);
-        assert_eq!(
-            stdout,
-            format!("opentune-beats {}\n", env!("CARGO_PKG_VERSION"))
-        );
+        assert_eq!(stdout, version_line_text());
     }
 
     #[test]
@@ -494,14 +506,13 @@ mod tests {
     }
 
     #[test]
-    fn analyze_reports_analysis_failed_until_the_engine_lands() {
+    fn analyze_on_a_missing_file_is_an_input_error() {
         let (code, stdout, stderr) = run_args("analyze take1.wav");
-        assert_eq!(code, EXIT_ANALYSIS_FAILED);
+        assert_eq!(code, 4);
         assert!(stdout.starts_with("{\"schemaVersion\":1,\"error\":{"));
-        assert!(stdout.contains("\"code\":\"ANALYSIS_FAILED\""));
+        assert!(stdout.contains("\"code\":\"INPUT_UNREADABLE\""));
         assert!(!stdout.contains("take1"));
-        assert_eq!(stdout.lines().count(), 1);
-        assert!(stderr.starts_with("opentune-beats: "));
+        assert!(stderr.contains("take1.wav"));
     }
 
     #[test]
@@ -510,19 +521,18 @@ mod tests {
             "analyze take1.wav --model small --models-dir models --pretty --no-refine ",
             "--min-segment-beats 4",
         );
-        let (code, stdout, stderr) = run_args(line);
-        assert_eq!(code, EXIT_ANALYSIS_FAILED);
+        let (code, stdout, _) = run_args(line);
+        // The options parse; the file does not exist, so the run stops at the input.
+        assert_eq!(code, 4);
         assert!(stdout.contains("\n  \"schemaVersion\": 1,"));
-        assert!(stdout.contains("\"code\": \"ANALYSIS_FAILED\""));
-        assert!(stderr.contains("model=small"));
-        assert!(stderr.contains("refine=off"));
-        assert!(stderr.contains("min_beats=4"));
+        assert!(stdout.contains("\"code\": \"INPUT_UNREADABLE\""));
+        assert!(!stdout.contains("\"code\": \"USAGE\""));
     }
 
     #[test]
-    fn analysis_error_never_echoes_the_input() {
+    fn input_errors_keep_the_path_out_of_the_json() {
         let (code, stdout, stderr) = run_args(r"analyze C:\Music\take1.wav");
-        assert_eq!(code, EXIT_ANALYSIS_FAILED);
+        assert_eq!(code, 4);
         assert!(!stdout.contains("Music"));
         assert!(!stdout.contains("take1"));
         assert!(stderr.contains(r"C:\Music\take1.wav"));

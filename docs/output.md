@@ -28,7 +28,7 @@ opentune-beats --version
 | Command | Output |
 | --- | --- |
 | `analyze <input>` | The analysis JSON of section 2, or the error JSON of section 3 |
-| `version` | One line: `opentune-beats <version> (beat-this <crate version>)`; this build prints the line without the `beat-this` suffix until the engine is linked (section 6) |
+| `version` | One line: `opentune-beats <version> (beat-this <crate version>)` |
 | `version --json` | The version JSON of section 4 |
 | `--version` | The same one line as `version` |
 | `--help`, `-h`, `help` | The usage text on stderr; stdout stays empty; exit code 0 |
@@ -84,8 +84,8 @@ the self-check a caller runs after installing the binary.
   file lives on the caller's machine. `input.durationSec`, `sampleRateHz` and `channels` describe
   the decoded audio.
 - `params` echoes the parameters the run actually used, so a stored result can be reproduced.
-  `maxRefineMs` is the window the refinement may move a beat; `frameSec` is the hop of the
-  onset envelope.
+  `maxRefineMs` is the window the refinement may move a beat; `frameSec` is the hop of the model's
+  frame grid.
 - `beats[].timeSec` is the final time, `beats[].rawTimeSec` the model's time before refinement.
   `confidence` is 0..1. `index` counts from 0 in time order. `segment` is the index into
   `segments`.
@@ -93,7 +93,8 @@ the self-check a caller runs after installing the binary.
   `NO_DOWNBEATS` warning says so. `isDownbeat` is then `false` for every beat.
 - `segments` are the constant-tempo spans: they cover the whole input, are contiguous and do not
   overlap. `startSec` and `endSec` are the span, `firstBeat` and `lastBeat` the beat indices in it.
-  `bpm` is the tempo and `beatPeriodSec` its reciprocal in seconds. `timeSignature` is the best
+  `bpm` is the tempo and `beatPeriodSec` its reciprocal in seconds (six decimals, so the two stay
+  consistent). `timeSignature` is the best
   reading and `timeSignatureCandidates` the scored alternatives. `fitResidualMs` describes how
   well a constant grid fits the beats in the span.
 - `segments[].octaveNote` is `"halved"`, `"doubled"` or `null`: set when a segment's reading was
@@ -131,6 +132,10 @@ the self-check a caller runs after installing the binary.
 | 3 | A model file is missing (`MODEL_MISSING`) or its SHA-256 does not match (`MODEL_CHECKSUM`) |
 | 4 | The input cannot be read or decoded (`INPUT_UNREADABLE`), or is too short to analyse (`INPUT_TOO_SHORT`) |
 | 5 | Analysis failed for any other reason (`ANALYSIS_FAILED`) |
+
+If stdout cannot be written (for example the reader closed the pipe), an `analyze` run exits 5
+because its result was lost. `version`, `--version` and `--help` keep exit code 0, and a usage
+error keeps 2: the command itself did not fail.
 
 On any non-zero exit, stdout still carries one JSON object:
 
@@ -185,11 +190,43 @@ identified by the same digests. A caller installs a release into
 models in `models/` next to it; the binary's default `--models-dir` is exactly that directory,
 so a release directory needs no arguments beyond the input file.
 
-## 6. Current state
+## 6. How the grid is produced
 
-This build is the repository skeleton: the command surface, the exit codes and the error JSON
-exist, `version` and `version --json` are complete, and `analyze` reports `ANALYSIS_FAILED`
-with a detail saying that beat tracking is not linked yet. `beatThis` is `null` and `models` is
-empty until the engine and the model pinning land; both fields are present so that a reader does
-not have to special-case the skeleton. The analysis JSON of section 2 is what the engine will
-produce, and is documented here so that the caller can be written against it now.
+The pipeline is fixed, and a stored result can be reproduced from `params` and `model`:
+
+1. **Input.** The file is read and decoded as WAV (PCM 8/16/24/32 or IEEE float 32, any sample
+   rate, any channel count up to 8, averaged to mono). A file that is not a readable WAV is
+   `INPUT_UNREADABLE`; one shorter than half a second is `INPUT_TOO_SHORT`.
+2. **Models.** `mel_spectrogram.onnx` and the beat model of `--model` are hashed before they are
+   loaded. The expected digests are compilation constants (`version --json` publishes them), so a
+   swapped or corrupted file is `MODEL_CHECKSUM`, and a missing one is `MODEL_MISSING`.
+3. **Inference.** beat-this (the `beat-this` crate, pure-Rust `rten` runtime) resamples to
+   22 050 Hz, computes the log-mel spectrogram and runs the transformer over 30 s chunks. It
+   returns beat times and downbeat times on a 20 ms frame grid; each beat keeps that frame's
+   beat probability as its `confidence`.
+4. **Refinement** (skipped with `--no-refine`). A 1 ms energy envelope of the decoded audio is
+   compared around every beat; the beat moves onto the attack, within `maxRefineMs`. A global
+   offset comes first, then a per-beat adjustment no larger than the same window. The numbers are
+   reported in `refinement`; a silent input or `--no-refine` leaves `applied` false and adds
+   `REFINE_SKIPPED`.
+5. **Tempo map.** The beats are split where the local inter-beat interval changes by more than
+   4 % over four beats; a span shorter than `minSegmentBeats` is merged into its neighbour. Each
+   span is fitted by least squares to `time = t0 + k * period`, which gives `bpm`, `beatPeriodSec`
+   and `fitResidualMs`. Spans are contiguous and cover the whole input, and the boundaries become
+   `tempoChanges`.
+6. **Octave reconciliation.** A span whose period is a factor of two off the other spans is
+   reconciled with them: a double-time span keeps every second beat (`octaveNote: "halved"`) and a
+   half-time span gains the midpoints (`octaveNote: "doubled"`). `POSSIBLE_HALF_TIME` and
+   `POSSIBLE_DOUBLE_TIME` report a whole reading that may be an octave away from the perceived
+   tempo without changing it.
+7. **Bars.** Downbeats are snapped to the nearest beat (within 60 ms); the most common distance
+   between downbeats is the time signature and its share of the downbeats is the candidate score.
+   Beats before an unreliable first downbeat keep `bar` and `beatInBar` as `null`. A grid without
+   two downbeats gets `NO_DOWNBEATS`; one whose downbeat distances disagree gets
+   `IRREGULAR_METER`.
+8. **Warnings and summary.** `SHORT_INPUT` marks an input under a few bars,
+   `LOW_CONFIDENCE_SEGMENT` a span whose beat confidence or fit is weak, and `summary` repeats the
+   counts a caller needs without walking the arrays.
+
+`error.detail` never repeats a value the user typed: no path, file name, unknown command or option
+value. The full value goes to stderr, which is where a caller looks when a run fails.

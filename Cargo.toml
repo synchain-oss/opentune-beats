@@ -17,10 +17,12 @@ publish = false
 name = "opentune-beats"
 path = "src/main.rs"
 
-# No dependencies yet. The beat tracker (beat-this-rs and its ONNX runtime) is added together
-# with the analysis engine; every crate added must be MIT / Apache-2.0 / BSD / ISC / Zlib /
-# Unicode licensed (deny.toml enforces the list).
+# The Beat This! model and its pure-Rust ONNX runtime. `default-features = false` drops the CLI,
+# the audio decoders (symphonia is MPL-2.0, outside the allow list) and serde: the WAV decoder,
+# the JSON writer and the SHA-256 check are ours, and `rten` needs no system library, so the
+# release stays one executable (docs/output.md, section 5).
 [dependencies]
+beat-this = { version = "=1.1.0", default-features = false }
 
 [profile.release]
 codegen-units = 1

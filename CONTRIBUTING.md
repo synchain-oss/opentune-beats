@@ -60,9 +60,11 @@ git rebase --signoff      # 一段区间
 - 构建与测试：`cargo build`、`cargo test`。Windows 上静态链接 CRT（`.cargo/config.toml` 里的
   `+crt-static`），所以产物不依赖 VC++ 运行库。
 - 模型文件**不入库**：需要分析时，把 `mel_spectrogram.onnx` 与 `beat_this_final.onnx`（或
-  `beat_this_small.onnx`）放进 `models/`（已被 `.gitignore` 忽略），来源与 SHA-256 见
-  [docs/output.md](./docs/output.md)。
-- 本仓维护者的机器上没有 Rust 工具链，构建与测试都在 CI 上做；如果你本地能编，请照 §6 跑一遍。
+  `beat_this_small.onnx`）放进 `models/`（已被 `.gitignore` 忽略）。
+  `node scripts/fetch-models.mjs --dir models --model final` 会按锁定的 URL 下载并逐个校验
+  SHA-256；来源与 digest 见 `src/models.rs` 与 [NOTICE](./NOTICE)。`cargo test` 不需要模型，
+  只有真实运行 `analyze` 与下面的精度检查需要。
+- 本机先跑 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`，再推；以 CI 为准（macOS universal2 只在 CI 上编）。
 
 ## 6. 提 PR 前的本地检查
 
@@ -81,6 +83,10 @@ node scripts/ci-checks.mjs pull-request-target
 
 `node scripts/ci-checks.mjs` 的文本检查扫描**已跟踪与未被忽略的文件**；被 `.gitignore` 忽略的（如本地
 `models/`、`target/`、`.cache/`）不扫描。
+
+合成伴奏的毫秒级精度检查由 CI 的 `accuracy` job 跑：`bench/gen.mjs` 按 `bench/tempo-map.json`
+渲染音频（不入库），`bench/score.mjs` 比较 `analyze` 的输出，中位误差 < 5 ms、P95 < 15 ms、
+±70 ms F ≥ 0.95 才算通过。本机有模型与二进制时可以照做。
 
 ## 7. ★ 不会被接受的改动
 
