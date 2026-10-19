@@ -350,17 +350,26 @@ fn run_analyze(options: &AnalyzeOptions) -> (u8, String, String) {
     }
 }
 
+/// The exit code when stdout could not be written. Only an `analyze` run that had succeeded, whose
+/// result was therefore lost, becomes a failure; a closed pipe on `version` or `--help`, and a
+/// command that had already failed (usage error 2, input error 4, ...), keep their own code.
+fn exit_after_write_failure(code: u8, is_analyze: bool) -> u8 {
+    if is_analyze && code == EXIT_OK {
+        EXIT_ANALYSIS_FAILURE
+    } else {
+        code
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let is_analyze = args.first().is_some_and(|arg| arg == "analyze");
-    let (code, stdout, stderr) = run(args);
+    let (mut code, stdout, stderr) = run(args);
     if !stdout.is_empty() {
         let mut out = io::stdout().lock();
         let wrote = out.write_all(stdout.as_bytes()).is_ok() && out.flush().is_ok();
-        // Only an analysis whose result cannot be delivered is a failure; a closed pipe on
-        // `version` or a usage error keeps the exit code of the command itself.
-        if !wrote && is_analyze {
-            return ExitCode::from(EXIT_ANALYSIS_FAILURE);
+        if !wrote {
+            code = exit_after_write_failure(code, is_analyze);
         }
     }
     if !stderr.is_empty() {
@@ -565,6 +574,18 @@ mod tests {
         assert!(!is_echoable_option(r"--C:\Music"));
         assert!(!is_echoable_option("--"));
         assert!(!is_echoable_option(&format!("--{}", "a".repeat(33))));
+    }
+
+    #[test]
+    fn only_a_successful_analyze_fails_when_stdout_is_lost() {
+        assert_eq!(
+            exit_after_write_failure(EXIT_OK, true),
+            EXIT_ANALYSIS_FAILURE
+        );
+        assert_eq!(exit_after_write_failure(EXIT_OK, false), EXIT_OK);
+        assert_eq!(exit_after_write_failure(EXIT_USAGE, true), EXIT_USAGE);
+        assert_eq!(exit_after_write_failure(4, true), 4);
+        assert_eq!(exit_after_write_failure(3, true), 3);
     }
 
     #[test]

@@ -64,7 +64,7 @@ git rebase --signoff      # 一段区间
   `node scripts/fetch-models.mjs --dir models --model final` 会按锁定的 URL 下载并逐个校验
   SHA-256；来源与 digest 见 `src/models.rs` 与 [NOTICE](./NOTICE)。`cargo test` 不需要模型，
   只有真实运行 `analyze` 与下面的精度检查需要。
-- 本机先跑 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`，再推；以 CI 为准（macOS universal2 只在 CI 上编）。
+- 本机先跑 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`；开 PR（或对 `feat/*` 分支手动触发 `workflow_dispatch`）后以 CI 为准，因为推 `feat/*` 本身不触发 CI；macOS universal2 只在 CI 上编，精度基准（`accuracy` job）在 ubuntu 上跑。
 
 ## 6. 提 PR 前的本地检查
 

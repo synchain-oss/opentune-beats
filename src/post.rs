@@ -99,18 +99,28 @@ struct OctaveFix {
 }
 
 /// Build the analysis from the raw grid.
+///
+/// Fails when fewer than two usable beats remain after the beats were cleaned, refined and
+/// reconciled: there is no grid to describe then. `Err` carries the number of beats left.
 pub fn build(
     raw: Vec<RawBeat>,
     downbeats: &[f64],
     envelope: Option<&OnsetEnvelope>,
     settings: &Settings,
-) -> Analysis {
+) -> Result<Analysis, usize> {
     let mut warnings: Vec<Warning> = Vec::new();
-    let (mut beats, refinement) = refine_beats(sanitize(raw), envelope, settings, &mut warnings);
+    let (refined, refinement) = refine_beats(sanitize(raw), envelope, settings, &mut warnings);
+    let mut beats = normalize(refined, settings.duration);
+    if beats.len() < 2 {
+        return Err(beats.len());
+    }
 
     let spans = detect_segments(&beats, settings.min_segment_beats);
     let (adjusted, fixes) = resolve_octaves(&beats, &spans, settings.min_segment_beats);
     beats = adjusted;
+    if beats.len() < 2 {
+        return Err(beats.len());
+    }
     let spans = if fixes.is_empty() {
         spans
     } else {
@@ -152,17 +162,18 @@ pub fn build(
         ));
     }
     let dominant_bpm = dominant_tempo(&segments);
+    // A fast reading may be double the perceived tempo, a slow one half of it.
     if dominant_bpm > 170.0 {
         warnings.push(warning(
-            "POSSIBLE_HALF_TIME",
-            "the reading may be half the perceived tempo",
+            "POSSIBLE_DOUBLE_TIME",
+            "the reading may be double the perceived tempo",
             None,
         ));
     }
     if dominant_bpm < 70.0 {
         warnings.push(warning(
-            "POSSIBLE_DOUBLE_TIME",
-            "the reading may be double the perceived tempo",
+            "POSSIBLE_HALF_TIME",
+            "the reading may be half the perceived tempo",
             None,
         ));
     }
@@ -183,14 +194,32 @@ pub fn build(
     });
 
     let tempo_changes = tempo_changes(&segments);
-    Analysis {
+    Ok(Analysis {
         beats,
         segments,
         tempo_changes,
         refinement,
         warnings,
         dominant_bpm,
+    })
+}
+
+/// Put the refined beats back in time order inside `[0, duration]` and drop a beat that lands
+/// within 1 ms of the one before it, so `index` counts in time order and the grid never has a
+/// zero or negative interval.
+fn normalize(mut beats: Vec<Beat>, duration: f64) -> Vec<Beat> {
+    for beat in &mut beats {
+        beat.time = beat.time.clamp(0.0, duration.max(0.0));
     }
+    beats.sort_by(|left, right| left.time.total_cmp(&right.time));
+    let mut out: Vec<Beat> = Vec::with_capacity(beats.len());
+    for beat in beats {
+        if out.last().is_some_and(|last| beat.time - last.time < 0.001) {
+            continue;
+        }
+        out.push(beat);
+    }
+    out
 }
 
 fn warning(code: &'static str, detail: &str, segment: Option<usize>) -> Warning {
@@ -269,9 +298,11 @@ fn refine_beats(
     let global = stats::median(&shifts).clamp(-limit, limit);
     let mut adjustments: Vec<f64> = Vec::with_capacity(beats.len());
     for (beat, shift) in beats.iter_mut().zip(shifts.iter()) {
-        let adjust = (shift - global).clamp(-limit, limit);
-        beat.time = (beat.raw + global + adjust).max(0.0);
-        adjustments.push(adjust.abs() * 1000.0);
+        // The whole displacement of a beat stays inside the window; `adjust` is how far it
+        // lies from the global offset.
+        let total = shift.clamp(-limit, limit);
+        beat.time = (beat.raw + total).max(0.0);
+        adjustments.push((total - global).abs() * 1000.0);
     }
     let refinement = Refinement {
         applied: true,
@@ -555,7 +586,10 @@ fn fit_segments(
         for beat in &beats[first..=last] {
             times.push(beat.time);
         }
-        let (offset, period) = stats::fit(&times).unwrap_or((times[0], 0.5));
+        // A span has at least two beats at least 1 ms apart, so the fit holds; if it ever does
+        // not, the span reports no tempo and zero confidence instead of an invented one.
+        let fitted = stats::fit(&times);
+        let (offset, period) = fitted.unwrap_or((times[0], 0.0));
         let residuals = stats::residuals_ms(&times, offset, period);
         let residual_median = stats::median(&residuals);
         let residual_p95 = stats::percentile(&residuals, 0.95);
@@ -591,7 +625,11 @@ fn fit_segments(
             period,
             signature,
             candidates: candidates.clone(),
-            confidence: (mean_confidence * fit_factor).clamp(0.0, 1.0),
+            confidence: if fitted.is_some() {
+                (mean_confidence * fit_factor).clamp(0.0, 1.0)
+            } else {
+                0.0
+            },
             residual_median_ms: residual_median,
             residual_p95_ms: residual_p95,
             octave_note: octave,
@@ -693,7 +731,7 @@ mod tests {
     #[test]
     fn a_single_tempo_becomes_one_segment() {
         let beats = grid(0.5, 0.5, 16);
-        let analysis = build(beats, &[], None, &settings(8.5));
+        let analysis = build(beats, &[], None, &settings(8.5)).expect("builds");
         assert_eq!(analysis.segments.len(), 1);
         let segment = &analysis.segments[0];
         assert!((segment.bpm - 120.0).abs() < 1e-6);
@@ -706,7 +744,7 @@ mod tests {
     fn a_step_change_splits_the_segments() {
         let mut beats = grid(0.5, 0.5, 16);
         beats.extend(grid(0.5 + 16.0 * 0.5, 0.4, 16));
-        let analysis = build(beats, &[], None, &settings(14.0));
+        let analysis = build(beats, &[], None, &settings(14.0)).expect("builds");
         assert_eq!(analysis.segments.len(), 2);
         assert!((analysis.segments[0].bpm - 120.0).abs() < 1.0);
         assert!((analysis.segments[1].bpm - 150.0).abs() < 1.0);
@@ -718,7 +756,7 @@ mod tests {
         let mut beats = grid(0.5, 0.5, 16);
         beats.extend(grid(8.5, 0.25, 32));
         beats.extend(grid(16.5, 0.5, 16));
-        let analysis = build(beats, &[], None, &settings(24.5));
+        let analysis = build(beats, &[], None, &settings(24.5)).expect("builds");
         let notes: Vec<Option<&str>> = analysis
             .segments
             .iter()
@@ -734,7 +772,7 @@ mod tests {
     fn downbeats_number_the_bars() {
         let beats = grid(0.5, 0.5, 16);
         let downbeats = [0.5, 2.5, 4.5, 6.5, 8.5];
-        let analysis = build(beats, &downbeats, None, &settings(8.5));
+        let analysis = build(beats, &downbeats, None, &settings(8.5)).expect("builds");
         assert!(analysis.beats[0].is_downbeat);
         assert_eq!(analysis.beats[0].bar, Some(1));
         assert_eq!(analysis.beats[0].beat_in_bar, Some(1));
@@ -747,7 +785,7 @@ mod tests {
 
     #[test]
     fn no_downbeats_leaves_bar_and_beat_in_bar_null() {
-        let analysis = build(grid(0.5, 0.5, 16), &[], None, &settings(8.5));
+        let analysis = build(grid(0.5, 0.5, 16), &[], None, &settings(8.5)).expect("builds");
         assert!(analysis.beats.iter().all(|beat| beat.bar.is_none()));
         assert!(analysis.beats.iter().all(|beat| beat.beat_in_bar.is_none()));
         assert!(analysis
@@ -759,11 +797,122 @@ mod tests {
     #[test]
     fn a_silent_envelope_skips_refinement() {
         let envelope = crate::onset::compute(&[0.0f32; 48_000], 48_000);
-        let analysis = build(grid(0.5, 0.5, 8), &[], Some(&envelope), &settings(4.5));
+        let analysis =
+            build(grid(0.5, 0.5, 8), &[], Some(&envelope), &settings(4.5)).expect("builds");
         assert!(!analysis.refinement.applied);
         assert!(analysis
             .warnings
             .iter()
             .any(|warning| warning.code == "REFINE_SKIPPED"));
+    }
+
+    fn has_warning(analysis: &Analysis, code: &str) -> bool {
+        analysis.warnings.iter().any(|warning| warning.code == code)
+    }
+
+    #[test]
+    fn a_fast_reading_may_be_double_time() {
+        let analysis = build(grid(0.5, 0.3, 24), &[], None, &settings(7.5)).expect("builds");
+        assert!(analysis.dominant_bpm > 170.0);
+        assert!(has_warning(&analysis, "POSSIBLE_DOUBLE_TIME"));
+        assert!(!has_warning(&analysis, "POSSIBLE_HALF_TIME"));
+    }
+
+    #[test]
+    fn a_slow_reading_may_be_half_time() {
+        let analysis = build(grid(0.5, 1.0, 12), &[], None, &settings(12.5)).expect("builds");
+        assert!(analysis.dominant_bpm < 70.0);
+        assert!(has_warning(&analysis, "POSSIBLE_HALF_TIME"));
+        assert!(!has_warning(&analysis, "POSSIBLE_DOUBLE_TIME"));
+    }
+
+    #[test]
+    fn fewer_than_two_usable_beats_is_an_error() {
+        let none = build(Vec::new(), &[], None, &settings(5.0));
+        assert_eq!(none.err(), Some(0));
+        // Negative and non-finite times are dropped by the cleaning.
+        let dropped = vec![
+            RawBeat {
+                time: -1.0,
+                confidence: 0.9,
+            },
+            RawBeat {
+                time: f64::NAN,
+                confidence: 0.9,
+            },
+            RawBeat {
+                time: 1.0,
+                confidence: 0.9,
+            },
+        ];
+        assert_eq!(build(dropped, &[], None, &settings(5.0)).err(), Some(1));
+        // Two beats within 1 ms are one beat.
+        let twins = vec![
+            RawBeat {
+                time: 1.0,
+                confidence: 0.9,
+            },
+            RawBeat {
+                time: 1.0005,
+                confidence: 0.9,
+            },
+        ];
+        assert_eq!(build(twins, &[], None, &settings(5.0)).err(), Some(1));
+    }
+
+    #[test]
+    fn two_beats_are_enough_for_a_segment() {
+        let analysis = build(grid(0.5, 0.5, 2), &[], None, &settings(2.0)).expect("builds");
+        assert_eq!(analysis.segments.len(), 1);
+        assert!((analysis.segments[0].bpm - 120.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn beats_stay_inside_the_input_and_in_order() {
+        // The last two beats lie past the end of a 4.8 s input.
+        let analysis = build(grid(0.5, 0.5, 12), &[], None, &settings(4.8)).expect("builds");
+        let last = analysis.beats.last().expect("beats");
+        assert!(last.time <= 4.8 + 1e-9);
+        for pair in analysis.beats.windows(2) {
+            assert!(pair[1].time - pair[0].time >= 0.001);
+        }
+        let segment = analysis.segments.last().expect("segments");
+        assert!(segment.end <= 4.8 + 1e-9);
+    }
+
+    #[test]
+    fn a_beat_moves_onto_its_own_attack_inside_the_window() {
+        // The first model beat is 25 ms early and the others 25 ms late: the median shift is
+        // negative, and the first beat must still reach its own attack, not stop short of it.
+        let rate = 48_000_u32;
+        let attacks = [0.525, 0.975, 1.475, 1.975, 2.475, 2.975];
+        let mut samples = vec![0.0f32; rate as usize * 4];
+        for attack in attacks {
+            let start = (attack * f64::from(rate)) as usize;
+            for offset in 0..(rate as usize / 200) {
+                let decay = (-(offset as f32) / (rate as f32 * 0.0015)).exp();
+                samples[start + offset] += 0.8 * decay;
+            }
+        }
+        let envelope = crate::onset::compute(&samples, rate);
+        let raw: Vec<RawBeat> = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
+            .iter()
+            .map(|time| RawBeat {
+                time: *time,
+                confidence: 0.9,
+            })
+            .collect();
+        let mut on = settings(4.0);
+        on.refine = true;
+        let analysis = build(raw, &[], Some(&envelope), &on).expect("builds");
+        assert!(analysis.refinement.applied);
+        for (beat, attack) in analysis.beats.iter().zip(attacks) {
+            assert!((beat.time - beat.raw).abs() <= 0.030 + 1e-9);
+            assert!(
+                (beat.time - attack).abs() < 0.002,
+                "{} vs {attack}",
+                beat.time
+            );
+        }
     }
 }

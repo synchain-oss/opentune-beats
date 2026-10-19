@@ -133,9 +133,10 @@ the self-check a caller runs after installing the binary.
 | 4 | The input cannot be read or decoded (`INPUT_UNREADABLE`), or is too short to analyse (`INPUT_TOO_SHORT`) |
 | 5 | Analysis failed for any other reason (`ANALYSIS_FAILED`) |
 
-If stdout cannot be written (for example the reader closed the pipe), an `analyze` run exits 5
-because its result was lost. `version`, `--version` and `--help` keep exit code 0, and a usage
-error keeps 2: the command itself did not fail.
+If stdout cannot be written (for example the reader closed the pipe), an `analyze` run that had
+succeeded exits 5, because its result was lost. Every other command keeps the exit code it already
+had: `version`, `--version` and `--help` stay 0, and a failed run keeps its own code (a usage
+error 2, an input error 4, and so on).
 
 On any non-zero exit, stdout still carries one JSON object:
 
@@ -206,8 +207,10 @@ The pipeline is fixed, and a stored result can be reproduced from `params` and `
    beat probability as its `confidence`.
 4. **Refinement** (skipped with `--no-refine`). A 1 ms energy envelope of the decoded audio is
    compared around every beat; the beat moves onto the attack, within `maxRefineMs`. A global
-   offset comes first, then a per-beat adjustment no larger than the same window. The numbers are
-   reported in `refinement`; a silent input or `--no-refine` leaves `applied` false and adds
+   offset comes first, then a per-beat adjustment; the total displacement of a beat (the global
+   offset plus its adjustment) never exceeds the same window. The beats are then put back in time
+   order, clamped to `[0, durationSec]`, and a beat within 1 ms of the one before it is dropped.
+   The numbers are reported in `refinement`; a silent input or `--no-refine` leaves `applied` false and adds
    `REFINE_SKIPPED`.
 5. **Tempo map.** The beats are split where the local inter-beat interval changes by more than
    4 % over four beats; a span shorter than `minSegmentBeats` is merged into its neighbour. Each

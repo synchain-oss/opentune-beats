@@ -29,5 +29,5 @@
 
 ## 4. 本地与 CI
 
-- 本机先跑 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`，再推 `feat/*` 分支；以 CI 为准（macOS universal2 只在 CI 上编）。
-- CI：Windows x64（MSVC，静态 CRT `/MT`）与 macOS universal2；`cargo fmt --check`、`cargo clippy -D warnings`、`cargo test`、基准精度检查、许可检查（`cargo deny`）。
+- 本机先跑 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`；开 PR（或对 `feat/*` 分支手动触发 `workflow_dispatch`）后以 CI 为准，因为推 `feat/*` 本身不触发 CI；macOS universal2 只在 CI 上编。
+- CI：Windows x64（MSVC，静态 CRT `/MT`）与 macOS universal2 跑 `cargo fmt --check`、`cargo clippy -D warnings`、`cargo test`；精度基准（`accuracy` job，ubuntu，合成鼓组）与许可检查（`cargo deny`）另有 job。

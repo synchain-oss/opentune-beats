@@ -137,15 +137,6 @@ pub fn run(request: &Request<'_>) -> Result<String, Failure> {
         .iter()
         .map(|time| f64::from(*time))
         .collect();
-    if raw.len() < 2 {
-        return Err(Failure::new(
-            "ANALYSIS_FAILED",
-            EXIT_ANALYSIS,
-            "the model found fewer than two beats",
-            format!("{}: {} beat(s)", request.input.display(), raw.len()),
-        ));
-    }
-
     let envelope = onset::compute(&audio.samples, audio.sample_rate);
     let min_segment_beats = request.min_segment_beats.max(2);
     let settings = post::Settings {
@@ -154,7 +145,18 @@ pub fn run(request: &Request<'_>) -> Result<String, Failure> {
         min_segment_beats,
         duration,
     };
-    let analysis = post::build(raw, &downbeats, Some(&envelope), &settings);
+    let found = raw.len();
+    let analysis = post::build(raw, &downbeats, Some(&envelope), &settings).map_err(|usable| {
+        Failure::new(
+            "ANALYSIS_FAILED",
+            EXIT_ANALYSIS,
+            "the model found fewer than two usable beats",
+            format!(
+                "{}: {found} beat(s) from the model, {usable} usable",
+                request.input.display()
+            ),
+        )
+    })?;
 
     let name = file_name(request.input);
     let context = output::Document {
