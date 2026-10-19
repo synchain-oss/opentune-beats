@@ -1,0 +1,21 @@
+OpenTune Beats
+Copyright (c) 2026 Synchain. Licensed under the MIT License (see LICENSE).
+
+This software uses the following third-party work.
+
+Beat This! (beat and downbeat tracking)
+  https://github.com/CPJKU/beat_this
+  Copyright (c) 2024 Institute of Computational Perception, JKU Linz, Austria
+  Code and published model weights: MIT License.
+  Training data: some of the training files are fully copyrighted or under
+  limited Creative Commons licenses. The MIT license of the weights is not
+  affected, but it is up to each user to assess whether this matters for
+  their use case.
+
+beat-this-rs (Rust port of Beat This!, including the ONNX model files)
+  https://github.com/danigb/beat-this-rs
+  Copyright (c) 2025 danigb
+  MIT License.
+
+The licenses of the Rust crates compiled into the binary are listed in
+THIRD-PARTY-NOTICES, generated from Cargo.lock for every release.

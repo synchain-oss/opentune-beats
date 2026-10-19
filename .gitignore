@@ -1,0 +1,8 @@
+/target/
+/models/*.onnx
+/bench/out/
+*.wav
+*.flac
+*.mp3
+*.mid
+.DS_Store
