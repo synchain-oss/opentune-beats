@@ -139,8 +139,9 @@ On any non-zero exit, stdout still carries one JSON object:
 }
 ```
 
-`detail` is a human-readable sentence. It names the input by file name only, never by path, and
-it never contains a credential. A caller branches on `code`, not on the text.
+`detail` is a human-readable sentence. It never repeats a value the user typed — not a path, a
+file name, an unknown command or an option value — and it never contains a credential; the full
+value is written to stderr instead. A caller branches on `code`, not on the text.
 
 ## 4. Version JSON
 

@@ -2,9 +2,9 @@
 # from crates.io, and carry no known vulnerability. Run by the `licenses` job of ci.yml as
 # `cargo deny --locked check licenses bans sources advisories`.
 #
-# Adding a license to `allow` is a licensing decision: only permissive licenses (MIT, Apache-2.0,
-# BSD, ISC, Zlib, Unicode and equivalents) belong here. GPL, LGPL and AGPL crates are never
-# allowed, and neither are crates that ship no license at all.
+# Adding a license to `allow` is a licensing decision: the list must stay within the range
+# CLAUDE.md §4 allows (MIT, Apache-2.0, BSD, ISC, Zlib, Unicode), a new entry needs a reason in
+# the pull request, and GPL, LGPL and AGPL are never allowed, nor are crates without a license.
 
 [graph]
 targets = [
@@ -24,13 +24,12 @@ unsound = "workspace"
 [licenses]
 # License texts are matched with a confidence score; below this the crate counts as unlicensed.
 confidence-threshold = 0.93
-# The allow list is intentionally broader than the current dependency graph, so that adding a
-# permissively licensed crate does not require touching this file. Report, do not fail, on
-# entries no crate uses.
-unused-allowed-license = "allow"
+# An allowed license that no crate uses is reported, not failed: the list is curated, and an
+# entry is added only together with a crate that needs it. Adding one is a licensing decision and
+# must stay within the range CLAUDE.md §4 allows.
+unused-allowed-license = "warn"
 allow = [
     "MIT",
-    "MIT-0",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
@@ -39,10 +38,6 @@ allow = [
     "Zlib",
     "Unicode-3.0",
     "Unicode-DFS-2016",
-    "CC0-1.0",
-    "0BSD",
-    "BSL-1.0",
-    "Unlicense",
 ]
 
 [bans]

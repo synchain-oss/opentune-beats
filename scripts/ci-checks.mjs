@@ -35,15 +35,6 @@ import { checkText, loadPatterns } from './check-attribution.mjs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PATTERNS_FILE = 'scripts/attribution-patterns.txt';
 
-/** Directories that are never part of the repository. */
-const SKIP_DIRS = new Set(['.git', '.cache', 'node_modules', 'target']);
-
-/**
- * Hidden directories of the repository. Any other dot-directory at the top level is local
- * tooling state (an editor, a scratch directory) and is not scanned.
- */
-const REPO_DOT_DIRS = new Set(['.cargo', '.github']);
-
 const MAINTAINER_NAME = 'DLsnows';
 
 /** The project's own addresses, as author or committer of a local commit. */
@@ -157,45 +148,64 @@ function commitExists(sha) {
 }
 
 /**
- * Every file of the working tree, as repository-relative paths with forward slashes.
+ * Every file that belongs to the repository, as repository-relative paths with forward slashes:
+ * the files in the index plus the untracked files that are not ignored.
+ *
+ * `git ls-files` is the authority, so a file `.gitignore` covers (a local `models/`, `target/`,
+ * `.cache/`) is not scanned, and a file that is in the index but deleted from disk is skipped.
+ * A missing git or a git failure throws, so the check fails instead of scanning nothing.
  * @returns {string[]}
  */
 function repoFiles() {
-  const files = [];
-  const walk = (dir) => {
-    for (const entry of fs.readdirSync(path.join(ROOT, dir), { withFileTypes: true })) {
-      const rel = dir ? `${dir}/${entry.name}` : entry.name;
-      // In a linked worktree `.git` is a file that points at the main repository.
-      if (!dir && entry.name === '.git') continue;
-      if (entry.isDirectory()) {
-        if (SKIP_DIRS.has(entry.name)) continue;
-        if (!dir && entry.name.startsWith('.') && !REPO_DOT_DIRS.has(entry.name)) continue;
-        walk(rel);
-      } else if (entry.isFile()) {
-        files.push(rel);
-      }
+  const listed = git(['ls-files', '-z', '--cached', '--others', '--exclude-standard']);
+  const files = new Set();
+  for (const rel of listed.split('\0')) {
+    if (!rel) continue;
+    try {
+      if (!fs.statSync(path.join(ROOT, rel)).isFile()) continue;
+    } catch (error) {
+      if (error.code === 'ENOENT') continue;
+      throw error;
     }
-  };
-  walk('');
-  return files.sort();
+    files.add(rel);
+  }
+  return [...files].sort();
 }
 
-/** A file's text, or null for binary content. */
+/** Files larger than this are reported instead of scanned, so nothing is skipped silently. */
+const MAX_TEXT_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Reads a file for the text checks.
+ * @returns {{ text: string } | { binary: true } | { tooLarge: number }}
+ */
 function readText(rel) {
   const file = path.join(ROOT, rel);
   const size = fs.statSync(file).size;
-  if (size > 2 * 1024 * 1024) return null;
+  if (size > MAX_TEXT_BYTES) return { tooLarge: size };
   const buffer = fs.readFileSync(file);
-  // A NUL byte in the first 8 KiB is the usual marker of a binary file.
-  if (buffer.subarray(0, 8192).includes(0)) return null;
-  return buffer.toString('utf8');
+  // A NUL byte in the first 8 KiB is the usual marker of a binary file; the assets check owns
+  // binary files.
+  if (buffer.subarray(0, 8192).includes(0)) return { binary: true };
+  return { text: buffer.toString('utf8') };
 }
 
+/**
+ * The text files, plus one problem per file that is too large to scan.
+ * @returns {{ files: { path: string, text: string }[], problems: string[] }}
+ */
 function textFiles() {
-  return repoFiles().flatMap((rel) => {
-    const text = readText(rel);
-    return text === null ? [] : [{ path: rel, text }];
-  });
+  const files = [];
+  const problems = [];
+  for (const rel of repoFiles()) {
+    const result = readText(rel);
+    if (result.text !== undefined) {
+      files.push({ path: rel, text: result.text });
+    } else if (result.tooLarge !== undefined) {
+      problems.push(`${rel}: file too large to scan (${result.tooLarge} bytes, limit ${MAX_TEXT_BYTES})`);
+    }
+  }
+  return { files, problems };
 }
 
 /** The first bytes of a file, for signature checks. */
@@ -580,18 +590,19 @@ const CHECKS = {
 
   files() {
     const patterns = loadPatterns(path.join(ROOT, PATTERNS_FILE));
-    const files = textFiles().filter((f) => f.path !== PATTERNS_FILE);
-    const problems = files.flatMap((f) =>
-      checkText(f.text, { patterns, source: f.path }).violations.map(
-        (v) => `${f.path}:${v.line}: [${v.rule}] ${v.text}`,
-      ),
-    );
-    return report('attribution', problems, `${files.length} text files: no AI attribution`);
+    const { files, problems } = textFiles();
+    const scanned = files.filter((file) => file.path !== PATTERNS_FILE);
+    for (const file of scanned) {
+      for (const violation of checkText(file.text, { patterns, source: file.path }).violations) {
+        problems.push(`${file.path}:${violation.line}: [${violation.rule}] ${violation.text}`);
+      }
+    }
+    return report('attribution', problems, `${scanned.length} text files: no AI attribution`);
   },
 
   privacy() {
-    const files = textFiles();
-    const problems = files.flatMap((f) => scanPrivacy(f.text, f.path));
+    const { files, problems } = textFiles();
+    for (const file of files) problems.push(...scanPrivacy(file.text, file.path));
     return report(
       'privacy',
       problems,

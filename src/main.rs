@@ -19,6 +19,11 @@ const EXIT_OK: u8 = 0;
 const EXIT_USAGE: u8 = 2;
 const EXIT_ANALYSIS_FAILED: u8 = 5;
 
+/// The `detail` of `ANALYSIS_FAILED`. It is deliberately static: stdout never carries a value the
+/// user typed, because a caller may log or forward it (`docs/output.md`). The values of the run
+/// are written to stderr instead.
+const ANALYZE_NOT_IMPLEMENTED: &str = "beat tracking is not implemented yet";
+
 const USAGE: &str = "\
 usage:
   opentune-beats analyze <input> [--model final|small] [--models-dir <dir>] [--pretty]
@@ -53,18 +58,47 @@ struct AnalyzeOptions {
     min_segment_beats: u32,
 }
 
-impl AnalyzeOptions {
-    /// The body of the `ANALYSIS_FAILED` error. Only the file name of the input is echoed: the
-    /// JSON output must never carry the input's directory (`docs/output.md`).
-    fn not_implemented_detail(&self) -> String {
-        let refine = if self.refine { "on" } else { "off" };
-        format!(
-            "beat tracking is not implemented yet (file {}, model {}, refine {}, min beats {})",
-            file_name(&self.input),
-            self.model.as_str(),
-            refine,
-            self.min_segment_beats,
-        )
+/// A rejected command line.
+///
+/// `detail` is the `detail` of the JSON error envelope and never contains a value the user typed.
+/// `message` is written to stderr, where the full input is allowed so that the user can see what
+/// was rejected (`docs/output.md`).
+#[derive(Debug)]
+struct UsageError {
+    detail: String,
+    message: String,
+}
+
+impl UsageError {
+    /// A rejection that names no value the user typed.
+    fn plain(detail: impl Into<String>) -> Self {
+        let detail = detail.into();
+        Self {
+            detail: detail.clone(),
+            message: detail,
+        }
+    }
+
+    /// An unknown option. A plain option name (`--bogus`) is repeated in `detail`; one that
+    /// carries a value, a path or non-ASCII text stays generic there and is named on stderr only.
+    fn unknown_option(arg: &str) -> Self {
+        let detail = if is_echoable_option(arg) {
+            format!("unknown option: {arg}")
+        } else {
+            "unknown option".to_string()
+        };
+        Self {
+            detail,
+            message: format!("unknown option: {arg}"),
+        }
+    }
+}
+
+/// A rejection of a value the user typed: `detail` goes to stdout, `detail: value` to stderr.
+fn value_error(detail: &str, value: &str) -> UsageError {
+    UsageError {
+        detail: detail.to_string(),
+        message: format!("{detail}: {value}"),
     }
 }
 
@@ -77,21 +111,33 @@ enum Command {
     Analyze(AnalyzeOptions),
 }
 
-/// The last path component, splitting on both separators so that the result is the same on every
-/// platform the binary is built for.
-fn file_name(input: &str) -> &str {
-    input.rsplit(['/', '\\']).next().unwrap_or(input)
+/// True for an option name that may be repeated in the JSON `detail`: `-x` or `--long-name`,
+/// ASCII letters and digits plus `-`, at most 32 characters after the dashes. Anything else (an
+/// option that carries a value, a path, non-ASCII text) stays generic in stdout.
+fn is_echoable_option(arg: &str) -> bool {
+    let name = match arg.strip_prefix("--") {
+        Some(name) => name,
+        None => match arg.strip_prefix('-') {
+            Some(name) => name,
+            None => return false,
+        },
+    };
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || bytes.len() > 32 || !bytes[0].is_ascii_alphanumeric() {
+        return false;
+    }
+    bytes[1..].iter().all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
 }
 
-fn parse(args: &[OsString]) -> Result<Command, String> {
+fn parse(args: &[OsString]) -> Result<Command, UsageError> {
     let first = match args.first() {
         Some(arg) => arg.to_string_lossy().into_owned(),
-        None => return Err("no command given".to_string()),
+        None => return Err(UsageError::plain("no command given")),
     };
     match first.as_str() {
         "--version" | "-V" => {
             if args.len() > 1 {
-                return Err("--version takes no arguments".to_string());
+                return Err(UsageError::plain("--version takes no arguments"));
             }
             Ok(Command::VersionLine)
         }
@@ -99,25 +145,25 @@ fn parse(args: &[OsString]) -> Result<Command, String> {
         "analyze" => parse_analyze(&args[1..]),
         "--help" | "-h" | "help" => {
             if args.len() > 1 {
-                return Err("--help takes no arguments".to_string());
+                return Err(UsageError::plain("--help takes no arguments"));
             }
             Ok(Command::Help)
         }
-        other => Err(format!("unknown command: {other}")),
+        other => Err(value_error("unknown command", other)),
     }
 }
 
-fn parse_version(args: &[OsString]) -> Result<Command, String> {
+fn parse_version(args: &[OsString]) -> Result<Command, UsageError> {
     let mut json = false;
     for raw in args {
         let arg = raw.to_string_lossy();
         if arg == "--json" {
             if json {
-                return Err("--json given more than once".to_string());
+                return Err(UsageError::plain("--json given more than once"));
             }
             json = true;
         } else {
-            return Err(format!("unknown argument for version: {arg}"));
+            return Err(value_error("unknown argument for version", &arg));
         }
     }
     if json {
@@ -127,7 +173,7 @@ fn parse_version(args: &[OsString]) -> Result<Command, String> {
     }
 }
 
-fn parse_analyze(args: &[OsString]) -> Result<Command, String> {
+fn parse_analyze(args: &[OsString]) -> Result<Command, UsageError> {
     let mut input: Option<String> = None;
     let mut model = Model::Final;
     let mut pretty = false;
@@ -147,30 +193,34 @@ fn parse_analyze(args: &[OsString]) -> Result<Command, String> {
             match value.as_str() {
                 "final" => model = Model::Final,
                 "small" => model = Model::Small,
-                other => return Err(format!("--model must be final or small, got {other}")),
+                other => return Err(value_error("--model must be final or small", other)),
             }
         } else if arg == "--models-dir" {
             index += 1;
             // Only validated here; the model loader reads the directory once the engine lands.
             let value = value_at(args, index, "--models-dir")?;
             if value.trim().is_empty() {
-                return Err("--models-dir must not be blank".to_string());
+                return Err(UsageError::plain("--models-dir must not be blank"));
             }
         } else if arg == "--min-segment-beats" {
             index += 1;
             let value = value_at(args, index, "--min-segment-beats")?;
             let parsed = match value.parse::<u32>() {
                 Ok(parsed) => parsed,
-                Err(_) => return Err(format!("--min-segment-beats needs a number, got {value}")),
+                Err(_) => {
+                    let detail = "--min-segment-beats needs a number";
+                    return Err(value_error(detail, &value));
+                }
             };
             if parsed == 0 {
-                return Err("--min-segment-beats must be at least 1".to_string());
+                let detail = "--min-segment-beats must be at least 1";
+                return Err(value_error(detail, &value));
             }
             min_segment_beats = parsed;
         } else if arg.starts_with('-') && arg != "-" {
-            return Err(format!("unknown option: {arg}"));
+            return Err(UsageError::unknown_option(&arg));
         } else if input.is_some() {
-            return Err("only one input file may be given".to_string());
+            return Err(value_error("only one input file may be given", &arg));
         } else {
             input = Some(arg);
         }
@@ -179,7 +229,7 @@ fn parse_analyze(args: &[OsString]) -> Result<Command, String> {
 
     let input = match input {
         Some(input) => input,
-        None => return Err("analyze requires an <input> file".to_string()),
+        None => return Err(UsageError::plain("analyze requires an <input> file")),
     };
     Ok(Command::Analyze(AnalyzeOptions {
         input,
@@ -190,10 +240,10 @@ fn parse_analyze(args: &[OsString]) -> Result<Command, String> {
     }))
 }
 
-fn value_at(args: &[OsString], index: usize, name: &str) -> Result<String, String> {
+fn value_at(args: &[OsString], index: usize, name: &str) -> Result<String, UsageError> {
     match args.get(index) {
         Some(raw) if !raw.is_empty() => Ok(raw.to_string_lossy().into_owned()),
-        _ => Err(format!("{name} requires a value")),
+        _ => Err(UsageError::plain(format!("{name} requires a value"))),
     }
 }
 
@@ -261,9 +311,14 @@ fn run<I: IntoIterator<Item = OsString>>(args: I) -> (u8, String, String) {
     let args: Vec<OsString> = args.into_iter().collect();
     let command = match parse(&args) {
         Ok(command) => command,
-        Err(message) => {
-            let json = error_json("USAGE", &message, false);
-            let log = format!("{name}: {message}\n\n{usage}\n", name = NAME, usage = USAGE);
+        Err(error) => {
+            let json = error_json("USAGE", &error.detail, false);
+            let log = format!(
+                "{name}: {message}\n\n{usage}\n",
+                name = NAME,
+                message = error.message,
+                usage = USAGE,
+            );
             return (EXIT_USAGE, json, log);
         }
     };
@@ -276,9 +331,16 @@ fn run<I: IntoIterator<Item = OsString>>(args: I) -> (u8, String, String) {
 }
 
 fn analyze(options: &AnalyzeOptions) -> (u8, String, String) {
-    let detail = options.not_implemented_detail();
-    let json = error_json("ANALYSIS_FAILED", &detail, options.pretty);
-    (EXIT_ANALYSIS_FAILED, json, String::new())
+    let json = error_json("ANALYSIS_FAILED", ANALYZE_NOT_IMPLEMENTED, options.pretty);
+    let log = format!(
+        "{name}: not implemented: file={file} model={model} refine={refine} min_beats={beats}\n",
+        name = NAME,
+        file = options.input.as_str(),
+        model = options.model.as_str(),
+        refine = if options.refine { "on" } else { "off" },
+        beats = options.min_segment_beats,
+    );
+    (EXIT_ANALYSIS_FAILED, json, log)
 }
 
 fn main() -> ExitCode {
@@ -307,11 +369,20 @@ mod tests {
         run(args)
     }
 
+    /// Runs the command with an explicit argument vector.
+    fn run_argv(args: &[&str]) -> (u8, String, String) {
+        let args: Vec<OsString> = args.iter().copied().map(OsString::from).collect();
+        run(args)
+    }
+
     #[test]
     fn version_flag_prints_one_line() {
         let (code, stdout, stderr) = run_args("--version");
         assert_eq!(code, EXIT_OK);
-        assert_eq!(stdout, format!("opentune-beats {}\n", env!("CARGO_PKG_VERSION")));
+        assert_eq!(
+            stdout,
+            format!("opentune-beats {}\n", env!("CARGO_PKG_VERSION"))
+        );
         assert!(stderr.is_empty());
     }
 
@@ -332,7 +403,10 @@ mod tests {
     fn version_without_json_prints_the_version_line() {
         let (code, stdout, _) = run_args("version");
         assert_eq!(code, EXIT_OK);
-        assert_eq!(stdout, format!("opentune-beats {}\n", env!("CARGO_PKG_VERSION")));
+        assert_eq!(
+            stdout,
+            format!("opentune-beats {}\n", env!("CARGO_PKG_VERSION"))
+        );
     }
 
     #[test]
@@ -340,6 +414,7 @@ mod tests {
         let (code, stdout, _) = run_args("version --json --pretty");
         assert_eq!(code, EXIT_USAGE);
         assert!(stdout.contains("\"code\":\"USAGE\""));
+        assert!(!stdout.contains("--pretty"));
     }
 
     #[test]
@@ -379,13 +454,20 @@ mod tests {
         let (code, stdout, _) = run_args("analyze take1.wav --bogus");
         assert_eq!(code, EXIT_USAGE);
         assert!(stdout.contains("unknown option: --bogus"));
+        // An option that carries a value is not a plain name: stdout keeps it generic.
+        let (code, stdout, _) = run_args("analyze take1.wav --bogus=1");
+        assert_eq!(code, EXIT_USAGE);
+        assert!(stdout.contains("\"detail\":\"unknown option\""));
+        assert!(!stdout.contains("bogus"));
     }
 
     #[test]
     fn analyze_rejects_an_unknown_model() {
-        let (code, stdout, _) = run_args("analyze take1.wav --model large");
+        let (code, stdout, stderr) = run_args("analyze take1.wav --model large");
         assert_eq!(code, EXIT_USAGE);
         assert!(stdout.contains("--model must be final or small"));
+        assert!(!stdout.contains("large"));
+        assert!(stderr.contains("large"));
     }
 
     #[test]
@@ -395,6 +477,7 @@ mod tests {
             let (code, stdout, _) = run_args(&line);
             assert_eq!(code, EXIT_USAGE, "value {value}");
             assert!(stdout.contains("--min-segment-beats"), "value {value}");
+            assert!(!stdout.contains(value), "value {value}");
         }
     }
 
@@ -414,9 +497,9 @@ mod tests {
         assert_eq!(code, EXIT_ANALYSIS_FAILED);
         assert!(stdout.starts_with("{\"schemaVersion\":1,\"error\":{"));
         assert!(stdout.contains("\"code\":\"ANALYSIS_FAILED\""));
-        assert!(stdout.contains("take1.wav"));
+        assert!(!stdout.contains("take1"));
         assert_eq!(stdout.lines().count(), 1);
-        assert!(stderr.is_empty());
+        assert!(stderr.starts_with("opentune-beats: "));
     }
 
     #[test]
@@ -425,27 +508,51 @@ mod tests {
             "analyze take1.wav --model small --models-dir models --pretty --no-refine ",
             "--min-segment-beats 4",
         );
-        let (code, stdout, _) = run_args(line);
+        let (code, stdout, stderr) = run_args(line);
         assert_eq!(code, EXIT_ANALYSIS_FAILED);
         assert!(stdout.contains("\n  \"schemaVersion\": 1,"));
         assert!(stdout.contains("\"code\": \"ANALYSIS_FAILED\""));
-        assert!(stdout.contains("model small"));
-        assert!(stdout.contains("refine off"));
-        assert!(stdout.contains("min beats 4"));
+        assert!(stderr.contains("model=small"));
+        assert!(stderr.contains("refine=off"));
+        assert!(stderr.contains("min_beats=4"));
     }
 
     #[test]
-    fn analysis_error_never_echoes_the_directory() {
-        let (_, stdout, _) = run_args(r"analyze C:\Music\take1.wav");
-        assert!(stdout.contains("take1.wav"));
+    fn analysis_error_never_echoes_the_input() {
+        let (code, stdout, stderr) = run_args(r"analyze C:\Music\take1.wav");
+        assert_eq!(code, EXIT_ANALYSIS_FAILED);
         assert!(!stdout.contains("Music"));
+        assert!(!stdout.contains("take1"));
+        assert!(stderr.contains(r"C:\Music\take1.wav"));
+    }
+
+    /// Asserts that a rejected command line keeps the user's values out of stdout.
+    fn assert_input_hidden(argv: &[&str]) {
+        let (code, stdout, stderr) = run_argv(argv);
+        assert_eq!(code, EXIT_USAGE, "{argv:?}");
+        assert!(!stdout.contains("Music"), "{argv:?}");
+        assert!(!stdout.contains("take1"), "{argv:?}");
+        assert!(stderr.starts_with("opentune-beats: "), "{argv:?}");
+        assert!(stderr.contains("Music"), "{argv:?}");
     }
 
     #[test]
-    fn file_name_splits_both_separators() {
-        assert_eq!(file_name(r"C:\Music\take1.wav"), "take1.wav");
-        assert_eq!(file_name("/music/take1.wav"), "take1.wav");
-        assert_eq!(file_name("take1.wav"), "take1.wav");
+    fn usage_errors_keep_user_input_out_of_the_json() {
+        let path = r"C:\Music\take1.wav";
+        assert_input_hidden(&["analyze", path, r"--bogus-opt=C:\Music\x"]);
+        assert_input_hidden(&[path]);
+        assert_input_hidden(&["version", r"C:\Music\x"]);
+    }
+
+    #[test]
+    fn echoable_option_names_are_plain_ascii_names() {
+        assert!(is_echoable_option("--bogus"));
+        assert!(is_echoable_option("-x"));
+        assert!(is_echoable_option("--a-b9"));
+        assert!(!is_echoable_option("--bogus=1"));
+        assert!(!is_echoable_option(r"--C:\Music"));
+        assert!(!is_echoable_option("--"));
+        assert!(!is_echoable_option(&format!("--{}", "a".repeat(33))));
     }
 
     #[test]

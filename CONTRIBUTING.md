@@ -79,6 +79,9 @@ node scripts/ci-checks.mjs pull-request-target
 
 依赖许可由 `cargo deny` 检查（`deny.toml`；CI 的 `licenses` job）。CI 的 `beats-gate` 是唯一必需的检查。
 
+`node scripts/ci-checks.mjs` 的文本检查扫描**已跟踪与未被忽略的文件**；被 `.gitignore` 忽略的（如本地
+`models/`、`target/`、`.cache/`）不扫描。
+
 ## 7. ★ 不会被接受的改动
 
 - **任何 GPL / LGPL / AGPL 代码或依赖**，包括从 Mixxx、qm-dsp、aubio、Essentia 等项目复制进来的实现。
