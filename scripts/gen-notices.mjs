@@ -152,7 +152,7 @@ function licenseIds(expression) {
 // A copyright notice starts with "Copyright" or "(c)" as a word of its own; the lowercase
 // "copyright notice ..." lines of the Apache definitions do not. The appendix of the Apache text
 // ("Copyright {yyyy} {name of copyright owner}") is a template, not a notice.
-const COPYRIGHT_RE = /^\s*(?:Copyright\b|©)/;
+const COPYRIGHT_RE = /^\s*(?:Copyright\b|\(c\)|©)/;
 const COPYRIGHT_TEMPLATE_RE = /\{yyyy\}|\[yyyy\]|\{name of copyright owner\}|\[name of copyright owner\]/i;
 
 /**

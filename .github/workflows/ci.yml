@@ -6,14 +6,13 @@ name: CI
 #
 # Triggers: a pull request into dev / prod / feature/**, a push to dev or feature/**, a manual
 # run on any branch, and a call from release.yml (`workflow_call`) before it packs a release.
-# Every job runs on every trigger, with one exception: a pull-request edit (`edited`) changes the
-# title or the body, not the commit, so only the text checks of the compliance job run again; the
-# build, licence and notices jobs are skipped. `beats-gate` accepts exactly that skip and nothing
-# else. The suite is small (one crate, two targets), and a check that only runs on some branches
-# is a check that surprises you on the merge.
+# Every job runs on every trigger, including a pull-request edit (`edited`): a run caused by a
+# changed body must not leave a green `beats-gate` on a commit whose build failed, because the
+# newest check of that name is the one a required check reads. The suite is small (one crate, two
+# targets), and a check that only runs on some branches is a check that surprises you on the merge.
 #
 # The single required check is `beats-gate`: it fails when any job below fails, was cancelled or
-# never ran. A required check must not be filtered by paths, and must not be skipped, so
+# was skipped. A required check must not be filtered by paths, and must not be skipped, so
 # `beats-gate` runs with `if: always()` and only inspects the results of its `needs`.
 #
 # This workflow reads no secret, so a pull request from a fork (once a maintainer approves the
@@ -28,17 +27,24 @@ on:
     branches: [dev, "feature/**"]
   workflow_dispatch:
   workflow_call:
+    inputs:
+      # Set by release.yml only. It tells this workflow that it runs for a release, not for a push:
+      # the concurrency group differs from the push run of the same commit, and the commit scope
+      # is the release one (`github.event_name` inside a called workflow is the caller's event).
+      release_call:
+        description: "Called from release.yml"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
-# One group per pull request and per kind of run. A push is grouped by commit: grouping by branch
-# would let a newer queued run replace an older one, and the commit in between would then never
-# have been checked. An edit skips the build jobs by its own `if:`, so it is grouped apart from
-# the run that builds the same commit: it can neither cancel that run (a queued run cancels a
-# pending one in its own group) nor be cancelled by it. Two edits supersede each other.
+# One group per pull request. A push is grouped by commit: grouping by branch would let a newer
+# queued run replace an older one, and the commit in between would then never have been checked.
+# A release run (release.yml calls this workflow) has its own group: the rehearsal or the tag
+# build of a commit must neither cancel the push run of that commit nor be cancelled by it.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || format('{0}@{1}', github.ref, github.sha) }}-${{ github.event.action == 'edited' && 'text' || 'code' }}
+  group: ci-${{ inputs.release_call && 'release-' || '' }}${{ github.event.pull_request.number || format('{0}@{1}', github.ref, github.sha) }}
   cancel-in-progress: true
 
 defaults:
@@ -63,25 +69,21 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
-      # An `edited` pull request changes the title, the body or the base, never the commit, so
-      # only the checks that read one of those run again: the commit range (whose base changed)
-      # and the title and body check. `edited` without a changed base skips the rest.
-      #
       # The attribution checker and its pattern list are byte-identical copies of the
       # maintainer's canonical files; the pinned digests detect any local edit.
       - name: Attribution checker matches its pinned sha256
-        if: ${{ !cancelled() && github.event.action != 'edited' }}
+        if: ${{ !cancelled() }}
         run: node scripts/ci-checks.mjs pins
       # The identity rules and the workflow scan have fixed test cases; the tests need no event
       # context, so they run here rather than on a pull request only.
       - name: ci-checks unit tests
-        if: ${{ !cancelled() && github.event.action != 'edited' }}
+        if: ${{ !cancelled() }}
         run: node --test scripts/ci-checks.test.mjs
       - name: Commit range and identity rules
         id: scope
-        if: ${{ !cancelled() && (github.event.action != 'edited' || github.event.changes.base != null) }}
+        if: ${{ !cancelled() }}
         env:
-          EVENT_NAME: ${{ github.event_name }}
+          EVENT_NAME: ${{ inputs.release_call && 'workflow_call' || github.event_name }}
           BASE_REF: ${{ github.base_ref }}
           BEFORE: ${{ github.event.before }}
           REF_NAME: ${{ github.ref_name }}
@@ -93,9 +95,9 @@ jobs:
         run: node scripts/ci-checks.mjs scope >> "$GITHUB_OUTPUT"
       # Each check runs even when an earlier one failed, so one run reports every problem.
       - name: Commits (DCO, attribution, identity)
-        if: ${{ !cancelled() && (github.event.action != 'edited' || github.event.changes.base != null) }}
+        if: ${{ !cancelled() }}
         env:
-          EVENT_NAME: ${{ github.event_name }}
+          EVENT_NAME: ${{ inputs.release_call && 'workflow_call' || github.event_name }}
           BASE_REF: ${{ github.base_ref }}
           BEFORE: ${{ github.event.before }}
           REF_NAME: ${{ github.ref_name }}
@@ -106,16 +108,16 @@ jobs:
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: node scripts/ci-checks.mjs commits
       - name: Files carry no AI attribution
-        if: ${{ !cancelled() && github.event.action != 'edited' }}
+        if: ${{ !cancelled() }}
         run: node scripts/ci-checks.mjs files
       - name: No personal paths or e-mail addresses
-        if: ${{ !cancelled() && github.event.action != 'edited' }}
+        if: ${{ !cancelled() }}
         run: node scripts/ci-checks.mjs privacy
       - name: No audio or model files
-        if: ${{ !cancelled() && github.event.action != 'edited' }}
+        if: ${{ !cancelled() }}
         run: node scripts/ci-checks.mjs assets
       - name: No pull-request-target trigger
-        if: ${{ !cancelled() && github.event.action != 'edited' }}
+        if: ${{ !cancelled() }}
         run: node scripts/ci-checks.mjs pull-request-target
       # PR titles and bodies are untrusted text: they reach the checker through `env:`, never by
       # expanding `${{ }}` inside the script.
@@ -130,7 +132,7 @@ jobs:
       # commit, so the scan sees exactly the tracked files and nothing the job wrote (the tool
       # cache, the target directory).
       - name: gitleaks (tracked files and branch commits)
-        if: ${{ !cancelled() && github.event.action != 'edited' }}
+        if: ${{ !cancelled() }}
         env:
           BASE: ${{ steps.scope.outputs.base }}
         run: |
@@ -149,8 +151,6 @@ jobs:
     name: rust (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
-    # An edit changes no commit: the build has nothing new to check.
-    if: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' }}
     strategy:
       fail-fast: false
       matrix:
@@ -259,8 +259,6 @@ jobs:
     name: licenses
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # An edit changes no commit: the policy check cannot differ either.
-    if: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -291,7 +289,6 @@ jobs:
     name: notices
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -320,7 +317,6 @@ jobs:
     name: accuracy (synthetic)
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    if: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -380,12 +376,9 @@ jobs:
           exit "$status"
 
   # The only required check. Every job above must have succeeded; a skipped or cancelled job is a
-  # failure here, so a required check can never pass because a job silently did not run. The one
-  # accepted skip is an `edited` pull request: an edit changes no commit, the build, licence and
-  # notices jobs skip by their own `if:`, and the compliance job re-runs the checks that read the
-  # title, the body or the base. The edited run is in its own concurrency group (see above), so it
-  # cannot have cancelled the run that builds the same commit; that run's gate replaces this one
-  # when it finishes, and a failing build still blocks the pull request.
+  # failure here, so a required check can never pass because a job silently did not run. No skip is
+  # accepted, not even on a pull-request edit: an edit re-runs every job, so the newest
+  # `beats-gate` of a commit always reflects a full run of that commit.
   beats-gate:
     name: beats-gate
     needs: [compliance, rust, licenses, notices, accuracy]
@@ -396,23 +389,11 @@ jobs:
       - name: Every job succeeded
         env:
           NEEDS: ${{ toJSON(needs) }}
-          EVENT_NAME: ${{ github.event_name }}
-          ACTION: ${{ github.event.action }}
         run: |
           status=0
-          edited_pr=false
-          if [ "$EVENT_NAME" = "pull_request" ] && [ "$ACTION" = "edited" ]; then
-            edited_pr=true
-          fi
           for job in compliance rust licenses notices accuracy; do
             result=$(jq -r --arg job "$job" '.[$job].result // "missing"' <<< "$NEEDS")
             echo "$job: $result"
-            # An edit skips the build and licence jobs on purpose; the commit itself was checked
-            # by the run that this one did not cancel.
-            if [ "$result" = "skipped" ] && [ "$edited_pr" = true ] && [ "$job" != "compliance" ]; then
-              echo "$job: skipped on a pull-request edit (the commit did not change)"
-              continue
-            fi
             if [ "$result" != success ]; then
               echo "::error::$job: $result (must succeed)"
               status=1

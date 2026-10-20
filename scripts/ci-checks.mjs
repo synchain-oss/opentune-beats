@@ -20,7 +20,7 @@
 //   privacy               personal paths and e-mail addresses outside the project's own
 //   assets                audio and model files, by extension and by signature
 //   pull-request-target   the pull_request_target ban in .github/workflows/, matched as YAML
-//                         (a key, a flow-sequence element or a sequence item); comments and
+//                         (a key, a scalar `on:`, a flow-sequence element or a sequence item); comments and
 //                         prose that merely mention the name do not count
 //
 // The identity rules and the workflow scan are unit-tested by scripts/ci-checks.test.mjs
@@ -448,6 +448,39 @@ export function checkCommits(commits, { allowExternalAuthors = false, allowDepen
 }
 
 /**
+ * The commit scope of a release run (release.yml calls ci.yml). A release tag must point at a
+ * commit on prod (release.yml's preflight enforces it), and every commit on prod came in through
+ * the dev -> prod pull request, where these checks already ran with prod's rules (web merge
+ * commits and external authors included). Held to project identities again, a web merge commit
+ * would be flagged for nothing, and the increment of such a tag over prod is empty by
+ * definition, so a head that is on prod is not re-checked (an empty range). A dry run on any
+ * other commit is a manual run: the commits that are not on the default branch, project
+ * identities only.
+ * @param {string} defaultBranch
+ * @param {boolean} onProd  whether HEAD is reachable from origin/prod
+ */
+export function calledWorkflowScope(defaultBranch, onProd) {
+  if (onProd) {
+    return {
+      base: 'HEAD',
+      allowExternalAuthors: false,
+      allowDependabot: false,
+      reason: 'release on a commit of prod: already checked by the pull request into prod, no new commits',
+    };
+  }
+  return {
+    base: `origin/${defaultBranch}`,
+    allowExternalAuthors: false,
+    allowDependabot: false,
+    reason: `release dry run: commits not on ${defaultBranch}`,
+  };
+}
+
+function headIsOnProd() {
+  return spawnSync('git', ['merge-base', '--is-ancestor', 'HEAD', 'origin/prod'], { cwd: ROOT, stdio: 'ignore' }).status === 0;
+}
+
+/**
  * Which commits the check covers, and how strictly.
  * @returns {{ base: string, allowExternalAuthors: boolean, allowDependabot: boolean, reason: string }}
  */
@@ -499,15 +532,9 @@ function commitScope() {
     };
   }
   if (event === 'workflow_call') {
-    // A reusable workflow keeps the caller's event for the rest of the context, but the name is
-    // reported as `workflow_call` in some situations. Treat it like a manual run: the commits
-    // that are not on the default branch, held to project identities.
-    return {
-      base: `origin/${defaultBranch}`,
-      allowExternalAuthors: false,
-      allowDependabot: false,
-      reason: `called workflow: commits not on ${defaultBranch}`,
-    };
+    // release.yml calls this workflow and passes `workflow_call` itself (ci.yml's `release_call`
+    // input): inside a called workflow `github.event_name` is the caller's event, a tag push.
+    return calledWorkflowScope(defaultBranch, headIsOnProd());
   }
   if (event === 'pull_request') {
     if (!baseRef) throw new Error('pull request without a base branch');
@@ -571,6 +598,7 @@ function checkBranchRule({ baseRef, headRef, headRepo, repo }) {
  *          pull_request_target]      -> a match
  *     on:
  *       - pull_request_target       -> a match
+ *     on: pull_request_target       -> a match (a scalar)
  *     "pull_request_target": ...    -> a match
  *     # never use pull_request_target  -> no match
  *     name: no pull_request_target here -> no match (prose, not a key or a sequence item)
@@ -579,15 +607,18 @@ function checkBranchRule({ baseRef, headRef, headRepo, repo }) {
  * @returns {number[]}
  */
 export function pullRequestTargetLines(text) {
-  const lines = text.split('\n');
+  // A CRLF file leaves `\r` at the end of every line: drop it so the `$` anchors still match.
+  const lines = text.split('\n').map((line) => line.replace(/\r$/, ''));
   const code = lines.map((line) => line.replace(/(^|\s)#.*$/, '')).join('\n');
   const key = /^[ \t]*["']?pull_request_target["']?[ \t]*:/gm;
   const item = /^[ \t]*-[ \t]*["']?pull_request_target["']?[ \t]*$/gm;
+  const scalar = /^[ \t]*["']?on["']?[ \t]*:[ \t]*["']?pull_request_target["']?[ \t]*$/gm;
   const flow = /[[{,][ \t\n]*["']?pull_request_target["']?[ \t\n]*(?=[\]},:])/g;
   const found = new Set();
   const add = (index) => found.add(code.slice(0, index).split('\n').length);
   for (const match of code.matchAll(key)) add(match.index);
   for (const match of code.matchAll(item)) add(match.index);
+  for (const match of code.matchAll(scalar)) add(match.index);
   for (const match of code.matchAll(flow)) add(match.index + match[0].indexOf('pull_request_target'));
   return [...found].sort((left, right) => left - right);
 }

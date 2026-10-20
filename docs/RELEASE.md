@@ -30,8 +30,10 @@ Naming rules:
 
 ## Steps (maintainer)
 
-1. **Bump the version.** Change `version` in `Cargo.toml` on `dev` (SemVer), and merge `dev` into
-   `prod` after review. `prod` is the only branch releases are built from.
+1. **Bump the version.** Change `version` in `Cargo.toml` on `dev`, and merge `dev` into
+   `prod` after review. `prod` is the only branch releases are built from. The version must be
+   `x.y.z`: only final versions are released, never a pre-release (no `-rc.1` or similar suffix);
+   the preflight job and `scripts/release-notes.mjs` both reject anything else.
 2. **Push the tag.** Create `v<version>` at the `prod` commit and push it:
    `git tag v0.1.0 && git push origin v0.1.0`. The tag name must be `v` plus the `Cargo.toml`
    version, or the run stops in `preflight`.

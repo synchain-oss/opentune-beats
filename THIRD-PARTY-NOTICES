@@ -37,7 +37,8 @@ anyhow 1.0.104
 Declared license: MIT OR Apache-2.0
 Upstream: https://github.com/dtolnay/anyhow
 
-Copyright: no copyright line in the published crate package; see the upstream entry above.
+Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
 
 ----- LICENSE-APACHE -----
                               Apache License
@@ -483,6 +484,7 @@ Declared license: MIT OR Apache-2.0
 Upstream: https://github.com/HEnquist/audioadapter-rs
 
 Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
   Copyright (c) 2026 Henrik Enquist (LICENSE-MIT)
 
 ----- LICENSE-APACHE -----
@@ -723,6 +725,7 @@ Declared license: MIT OR Apache-2.0
 Upstream: https://github.com/HEnquist/audioadapter-buffers-rs
 
 Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
   Copyright (c) 2026 Henrik Enquist (LICENSE-MIT)
 
 ----- LICENSE-APACHE -----
@@ -963,6 +966,7 @@ Declared license: MIT OR Apache-2.0
 Upstream: https://github.com/HEnquist/audioadapter-sample-rs
 
 Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
   Copyright (c) 2026 Henrik Enquist (LICENSE-MIT)
 
 ----- LICENSE-APACHE -----
@@ -1203,6 +1207,7 @@ Declared license: Apache-2.0 OR MIT
 Upstream: https://github.com/cuviper/autocfg
 
 Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
   Copyright (c) 2018 Josh Stone (LICENSE-MIT)
 
 ----- LICENSE-APACHE -----
@@ -1479,6 +1484,7 @@ Declared license: MIT/Apache-2.0
 Upstream: https://github.com/bitflags/bitflags
 
 Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
   Copyright (c) 2014 The Rust Project Developers (LICENSE-MIT)
 
 ----- LICENSE-APACHE -----
@@ -1717,6 +1723,7 @@ Declared license: MIT OR Apache-2.0
 Upstream: https://github.com/crossbeam-rs/crossbeam
 
 Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
   Copyright (c) 2019 The Crossbeam Project Developers (LICENSE-MIT)
 
 ----- LICENSE-APACHE -----
@@ -1957,6 +1964,7 @@ Declared license: MIT OR Apache-2.0
 Upstream: https://github.com/crossbeam-rs/crossbeam
 
 Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
   Copyright (c) 2019 The Crossbeam Project Developers (LICENSE-MIT)
 
 ----- LICENSE-APACHE -----
@@ -2197,6 +2205,7 @@ Declared license: MIT OR Apache-2.0
 Upstream: https://github.com/crossbeam-rs/crossbeam
 
 Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
   Copyright (c) 2019 The Crossbeam Project Developers (LICENSE-MIT)
 
 ----- LICENSE-APACHE -----
@@ -2437,6 +2446,7 @@ Declared license: MIT OR Apache-2.0
 Upstream: https://github.com/rayon-rs/either
 
 Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
   Copyright (c) 2015 (LICENSE-MIT)
 
 ----- LICENSE-APACHE -----
@@ -2887,6 +2897,7 @@ Declared license: MIT OR Apache-2.0
 Upstream: https://github.com/rust-lang/libc
 
 Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
   Copyright (c) The Rust Project Developers (LICENSE-MIT)
 
 ----- LICENSE-APACHE -----
@@ -3100,6 +3111,7 @@ Declared license: MIT OR Apache-2.0
 Upstream: https://github.com/rust-num/num-complex
 
 Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
   Copyright (c) 2014 The Rust Project Developers (LICENSE-MIT)
 
 ----- LICENSE-APACHE -----
@@ -3338,6 +3350,7 @@ Declared license: MIT OR Apache-2.0
 Upstream: https://github.com/rust-num/num-integer
 
 Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
   Copyright (c) 2014 The Rust Project Developers (LICENSE-MIT)
 
 ----- LICENSE-APACHE -----
@@ -3576,6 +3589,7 @@ Declared license: MIT OR Apache-2.0
 Upstream: https://github.com/rust-num/num-traits
 
 Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
   Copyright (c) 2014 The Rust Project Developers (LICENSE-MIT)
 
 ----- LICENSE-APACHE -----
@@ -3814,6 +3828,7 @@ Declared license: MIT OR Apache-2.0
 Upstream: https://github.com/seanmonstar/num_cpus
 
 Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
   Copyright (c) 2015-2025 Sean McArthur (LICENSE-MIT)
 
 ----- LICENSE-APACHE -----
@@ -4046,6 +4061,7 @@ Declared license: MIT OR Apache-2.0
 Upstream: https://github.com/huonw/primal
 
 Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
   Copyright (c) 2014 Huon Wilson (LICENSE-MIT)
 
 ----- LICENSE-APACHE -----
@@ -4283,7 +4299,8 @@ proc-macro2 1.0.107
 Declared license: MIT OR Apache-2.0
 Upstream: https://github.com/dtolnay/proc-macro2
 
-Copyright: no copyright line in the published crate package; see the upstream entry above.
+Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
 
 ----- LICENSE-APACHE -----
                               Apache License
@@ -4493,7 +4510,8 @@ quote 1.0.47
 Declared license: MIT OR Apache-2.0
 Upstream: https://github.com/dtolnay/quote
 
-Copyright: no copyright line in the published crate package; see the upstream entry above.
+Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
 
 ----- LICENSE-APACHE -----
                               Apache License
@@ -4704,6 +4722,7 @@ Declared license: MIT OR Apache-2.0
 Upstream: https://github.com/rayon-rs/rayon
 
 Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
   Copyright (c) 2010 The Rust Project Developers (LICENSE-MIT)
 
 ----- LICENSE-APACHE -----
@@ -4942,6 +4961,7 @@ Declared license: MIT OR Apache-2.0
 Upstream: https://github.com/rayon-rs/rayon
 
 Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
   Copyright (c) 2010 The Rust Project Developers (LICENSE-MIT)
 
 ----- LICENSE-APACHE -----
@@ -7355,7 +7375,8 @@ rustc-hash 2.1.3
 Declared license: Apache-2.0 OR MIT
 Upstream: https://github.com/rust-lang/rustc-hash
 
-Copyright: no copyright line in the published crate package; see the upstream entry above.
+Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
 
 ----- LICENSE-APACHE -----
                               Apache License
@@ -7566,6 +7587,7 @@ Declared license: MIT OR Apache-2.0
 Upstream: https://github.com/djc/rustc-version-rs
 
 Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
   Copyright (c) 2016 The Rust Project Developers (LICENSE-MIT)
 
 ----- LICENSE-APACHE -----
@@ -7804,6 +7826,7 @@ Declared license: MIT OR Apache-2.0
 Upstream: https://github.com/ejmahler/RustFFT
 
 Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
   Copyright (c) 2015 The RustFFT Developers (LICENSE-MIT)
 
 ----- LICENSE-APACHE -----
@@ -8035,7 +8058,8 @@ semver 1.0.28
 Declared license: MIT OR Apache-2.0
 Upstream: https://github.com/dtolnay/semver
 
-Copyright: no copyright line in the published crate package; see the upstream entry above.
+Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
 
 ----- LICENSE-APACHE -----
                               Apache License
@@ -8246,6 +8270,7 @@ Declared license: MIT OR Apache-2.0
 Upstream: https://github.com/servo/rust-smallvec
 
 Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
   Copyright (c) 2018 The Servo Project Developers (LICENSE-MIT)
 
 ----- LICENSE-APACHE -----
@@ -8484,6 +8509,7 @@ Declared license: MIT OR Apache-2.0
 Upstream: http://github.com/ejmahler/strength_reduce
 
 Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
   Copyright (c) 2015 The RustFFT Developers (LICENSE-MIT)
 
 ----- LICENSE-APACHE -----
@@ -8715,7 +8741,8 @@ syn 2.0.119
 Declared license: MIT OR Apache-2.0
 Upstream: https://github.com/dtolnay/syn
 
-Copyright: no copyright line in the published crate package; see the upstream entry above.
+Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
 
 ----- LICENSE-APACHE -----
                               Apache License
@@ -8926,6 +8953,7 @@ Declared license: MIT OR Apache-2.0
 Upstream: https://github.com/ejmahler/transpose
 
 Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
   Copyright 2022 The transpose developers (LICENSE-APACHE)
   Copyright (c) 2022 The transpose Developers (LICENSE-MIT)
 
@@ -9164,7 +9192,8 @@ typeid 1.0.3
 Declared license: MIT OR Apache-2.0
 Upstream: https://github.com/dtolnay/typeid
 
-Copyright: no copyright line in the published crate package; see the upstream entry above.
+Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
 
 ----- LICENSE-APACHE -----
                               Apache License
@@ -9375,6 +9404,7 @@ Declared license: (MIT OR Apache-2.0) AND Unicode-3.0
 Upstream: https://github.com/dtolnay/unicode-ident
 
 Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
   Copyright © 1991-2023 Unicode, Inc. (LICENSE-UNICODE)
 
 ----- LICENSE-APACHE -----
@@ -9627,6 +9657,7 @@ Declared license: Zlib OR MIT OR Apache-2.0
 Upstream: https://github.com/danielhenrymantilla/visibility.rs
 
 Copyright:
+  (c) You must retain, in the Source form of any Derivative Works (LICENSE-APACHE)
   Copyright 2024 Daniel Henry-Mantilla (LICENSE-APACHE)
   Copyright (c) 2024 Daniel Henry-Mantilla (LICENSE-MIT)
 

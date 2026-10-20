@@ -73,6 +73,12 @@ jobs:
             echo "::error::Cargo.toml has no package version"
             exit 1
           fi
+          # Releases are final versions only: release-notes.mjs accepts x.y.z and nothing else, so
+          # fail here, before anything is built.
+          if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Cargo.toml version $version is not x.y.z (pre-release versions are not released)"
+            exit 1
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           if [ "$REF_TYPE" != "tag" ]; then
             echo "tag=v$version" >> "$GITHUB_OUTPUT"
@@ -96,6 +102,10 @@ jobs:
     name: CI checks
     needs: preflight
     uses: ./.github/workflows/ci.yml
+    # `release_call` gives the called run its own concurrency group (it must not cancel, or be
+    # cancelled by, the push run of the same commit) and its release commit scope.
+    with:
+      release_call: true
 
   build-windows:
     name: build (windows-x64)
@@ -132,8 +142,10 @@ jobs:
           binary=target/x86_64-pc-windows-msvc/release/opentune-beats.exe
           "$binary" --version
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
-          "$binary" version --json | jq -e --arg version "$version" '
-            (.name == "opentune-beats") and (.version == $version) and (.schemaVersion == 1)'
+          "$binary" version --json > "$RUNNER_TEMP/version-win-x64.json"
+          jq -e --arg version "$version" '
+            (.name == "opentune-beats") and (.version == $version) and (.schemaVersion == 1)' \
+            "$RUNNER_TEMP/version-win-x64.json"
       # The executable sits at the root of the archive together with the licence files. Entries
       # are named one by one (never a recursive add), so every name is a plain name with no
       # separator and the caller's no-backslash rule holds by construction; the archive is listed
@@ -179,6 +191,14 @@ jobs:
           path: ${{ runner.temp }}/opentune-beats-${{ needs.preflight.outputs.version }}-win-x64.zip
           if-no-files-found: error
           retention-days: 14
+      # The model digests the binary reports; the package job compares them with the files that
+      # ship. A small JSON file for the workflow only, never a release asset.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: version-json-win-x64
+          path: ${{ runner.temp }}/version-win-x64.json
+          if-no-files-found: error
+          retention-days: 14
 
   build-macos:
     name: build (macos-universal2)
@@ -219,10 +239,16 @@ jobs:
         run: |
           "$RUNNER_TEMP/opentune-beats" --version
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
-          "$RUNNER_TEMP/opentune-beats" version --json | jq -e --arg version "$version" '
-            (.name == "opentune-beats") and (.version == $version) and (.schemaVersion == 1)'
+          "$RUNNER_TEMP/opentune-beats" version --json > "$RUNNER_TEMP/version-macos-universal2.json"
+          jq -e --arg version "$version" '
+            (.name == "opentune-beats") and (.version == $version) and (.schemaVersion == 1)' \
+            "$RUNNER_TEMP/version-macos-universal2.json"
       # The files sit at the root of the archive (no `./` prefix) and the executable keeps its
       # mode. `tar -tvzf` is the assertion, not a copy of it from the staging directory.
+      # The runner's tar is bsdtar (libarchive): COPYFILE_DISABLE=1 and --no-mac-metadata keep
+      # AppleDouble `._*` entries and extended attributes out of the archive, and the owner is
+      # fixed to root with no name, so the archive does not carry the runner's user. The `._*`
+      # entries are rejected by the exact entry list below, not assumed away.
       - name: Pack the macOS archive
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
@@ -233,7 +259,8 @@ jobs:
           cp "$RUNNER_TEMP/opentune-beats" "$stage/opentune-beats"
           chmod 755 "$stage/opentune-beats"
           cp LICENSE NOTICE THIRD-PARTY-NOTICES "$stage/"
-          tar -czf "$asset" -C "$stage" opentune-beats LICENSE NOTICE THIRD-PARTY-NOTICES
+          COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs --uid 0 --gid 0 --uname '' --gname '' \
+            -czf "$asset" -C "$stage" opentune-beats LICENSE NOTICE THIRD-PARTY-NOTICES
           gzip -t "$asset"
           tar -tvzf "$asset"
           expected=$(printf '%s\n' LICENSE NOTICE THIRD-PARTY-NOTICES opentune-beats | sort)
@@ -255,6 +282,12 @@ jobs:
         with:
           name: release-macos-universal2
           path: ${{ runner.temp }}/opentune-beats-${{ needs.preflight.outputs.version }}-macos-universal2.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: version-json-macos-universal2
+          path: ${{ runner.temp }}/version-macos-universal2.json
           if-no-files-found: error
           retention-days: 14
 
@@ -299,12 +332,49 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
-      - name: Collect the packed assets
+      # The three artifacts are named one by one: a pattern such as `release-*` would also match
+      # the `release-assets` artifact this job uploads, which a re-run would then pull back in.
+      - name: Collect the Windows archive
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: release-*
+          name: release-win-x64
           path: dist
-          merge-multiple: true
+      - name: Collect the macOS archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-macos-universal2
+          path: dist
+      - name: Collect the models
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-models
+          path: dist
+      # The model digests exist in two places: compiled into each binary (`version --json`) and
+      # in the files that ship. They must agree, or a downloader that trusts the binary's digests
+      # would reject, or accept, the wrong file.
+      - name: Collect the digests the binaries report
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: version-json-*
+          path: reported
+      - name: The binaries report the digests of the shipped models
+        run: |
+          status=0
+          for report in reported/version-json-win-x64/version-win-x64.json \
+                        reported/version-json-macos-universal2/version-macos-universal2.json; do
+            for key in mel small final; do
+              file=$(jq -r --arg key "$key" '.models[$key].file' "$report")
+              reported_sha=$(jq -r --arg key "$key" '.models[$key].sha256' "$report")
+              actual_sha=$(sha256sum "dist/$file" | cut -d' ' -f1)
+              if [ "$reported_sha" = "$actual_sha" ]; then
+                echo "ok: $report $key $file $actual_sha"
+              else
+                echo "::error::$report: $key ($file) reports $reported_sha, the shipped file is $actual_sha"
+                status=1
+              fi
+            done
+          done
+          exit "$status"
       - name: SHA256SUMS and the release body
         env:
           VERSION: ${{ needs.preflight.outputs.version }}

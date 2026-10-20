@@ -13,7 +13,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { checkAuthor, checkCommits, checkCommitter, parseGitLog, pullRequestTargetLines } from './ci-checks.mjs';
+import {
+  calledWorkflowScope,
+  checkAuthor,
+  checkCommits,
+  checkCommitter,
+  parseGitLog,
+  pullRequestTargetLines,
+} from './ci-checks.mjs';
 
 const MAINTAINER = 'DLsnows';
 const PROJECT_EMAIL = 'noreply@synchain.ca';
@@ -150,4 +157,23 @@ test('pullRequestTargetLines matches YAML, not comments or prose', () => {
   assert.deepEqual(pullRequestTargetLines('name: no pull_request_target here\n'), []);
   assert.deepEqual(pullRequestTargetLines('run: echo pull_request_target\n'), []);
   assert.deepEqual(pullRequestTargetLines('    uses: x/y@abc # pull_request_target\n'), []);
+});
+
+test('pullRequestTargetLines matches the scalar form and CRLF files', () => {
+  assert.deepEqual(pullRequestTargetLines('on: pull_request_target\n'), [1]);
+  assert.deepEqual(pullRequestTargetLines('"on": \'pull_request_target\'\n'), [1]);
+  assert.deepEqual(pullRequestTargetLines('on: "pull_request_target"\n'), [1]);
+  assert.deepEqual(pullRequestTargetLines('on:\r\n  - pull_request_target\r\n'), [2]);
+  assert.deepEqual(pullRequestTargetLines('on: push # pull_request_target\n'), []);
+  assert.deepEqual(pullRequestTargetLines('# on: pull_request_target\non: push\n'), []);
+});
+
+test('calledWorkflowScope: a release on prod adds no commits, a dry run is a manual run', () => {
+  const release = calledWorkflowScope('dev', true);
+  assert.equal(release.base, 'HEAD');
+  assert.equal(release.allowExternalAuthors, false);
+  const dryRun = calledWorkflowScope('dev', false);
+  assert.equal(dryRun.base, 'origin/dev');
+  assert.equal(dryRun.allowExternalAuthors, false);
+  assert.equal(dryRun.allowDependabot, false);
 });
