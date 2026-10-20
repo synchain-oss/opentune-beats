@@ -62,7 +62,8 @@ git rebase --signoff      # 一段区间
 - 模型文件**不入库**：需要分析时，把 `mel_spectrogram.onnx` 与 `beat_this_final.onnx`（或
   `beat_this_small.onnx`）放进 `models/`（已被 `.gitignore` 忽略）。
   `node scripts/fetch-models.mjs --dir models --model final` 会按锁定的 URL 下载并逐个校验
-  SHA-256；来源与 digest 见 `src/models.rs` 与 [NOTICE](./NOTICE)。`cargo test` 不需要模型，
+  SHA-256；模型的来源见 [NOTICE](./NOTICE)，期望的 digest 由二进制发布
+  （`version --json`，见 [docs/output.md](./docs/output.md)），也定义在 `src/models.rs`。`cargo test` 不需要模型，
   只有真实运行 `analyze` 与下面的精度检查需要。
 - 本机先跑 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`；开 PR（或对 `feat/*` 分支手动触发 `workflow_dispatch`）后以 CI 为准，因为推 `feat/*` 本身不触发 CI；macOS universal2 只在 CI 上编，精度基准（`accuracy` job）在 ubuntu 上跑。
 
@@ -73,6 +74,8 @@ cargo fmt --all --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 node scripts/ci-checks.mjs pins      # 署名检查器与其模式表未被改动
+node --test scripts/ci-checks.test.mjs   # 身份规则与 workflow 扫描的固定用例
+node scripts/gen-notices.mjs --check     # THIRD-PARTY-NOTICES 与发布依赖图一致
 node scripts/ci-checks.mjs files     # 无 AI 署名
 node scripts/ci-checks.mjs privacy   # 无个人路径与个人邮箱
 node scripts/ci-checks.mjs assets    # 无音频与模型文件
@@ -121,6 +124,7 @@ node bench/score.mjs --map bench/maps/gaps.json --analysis bench/out/gaps.json
 ## 9. 发布流程（仅维护者）
 
 - 版本号真源是 `Cargo.toml` 的 `version`，遵循 SemVer。
-- `dev` → `prod` 经维护者审核批准；在 `prod` 上推 `vX.Y.Z` tag 触发发版（发版流程随发版卡片加入）。
+- `dev` → `prod` 经维护者审核批准；在 `prod` 上推 `vX.Y.Z` tag 触发发版（流程见
+  [docs/RELEASE.md](./docs/RELEASE.md)，`workflow_dispatch` 演练不建 Release）。
 - 发布资产：`opentune-beats-<ver>-win-x64.zip`、`opentune-beats-<ver>-macos-universal2.tar.gz`、
   三个模型文件与 `SHA256SUMS`。

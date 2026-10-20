@@ -57,6 +57,26 @@ async function download(url) {
   return Buffer.from(await response.arrayBuffer());
 }
 
+/**
+ * Writes the bytes to a fresh file. An existing path is never followed: a symbolic link there
+ * (a `.part` left behind by something else) is refused, a regular file is removed first, and the
+ * final open is exclusive (`wx`), so a file created between the check and the write fails the
+ * run instead of being written through.
+ * @param {string} file
+ * @param {Buffer} bytes
+ */
+function writeFresh(file, bytes) {
+  let stat = null;
+  try {
+    stat = fs.lstatSync(file);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  if (stat?.isSymbolicLink()) throw new Error(`${file}: refusing to write through a symbolic link`);
+  if (stat) fs.rmSync(file);
+  fs.writeFileSync(file, bytes, { flag: 'wx' });
+}
+
 async function ensure(directory, model) {
   const target = path.join(directory, model.file);
   if (fs.existsSync(target)) {
@@ -74,17 +94,17 @@ async function ensure(directory, model) {
     throw new Error(`${model.file}: sha256 ${actual} != ${model.sha256}`);
   }
   const partial = `${target}.part`;
-  fs.writeFileSync(partial, bytes);
+  writeFresh(partial, bytes);
   fs.renameSync(partial, target);
   console.error(`saved     ${model.file} (${bytes.length} bytes)`);
 }
 
 try {
   const options = parseArgs(process.argv.slice(2));
-  const wanted = options.model === 'all' ? ['mel', 'final', 'small'] : ['mel', options.model];
-  if (options.model !== 'all' && !(options.model in MODELS)) {
+  if (options.model !== 'all' && !Object.hasOwn(MODELS, options.model)) {
     throw new Error(`unknown model ${options.model}`);
   }
+  const wanted = options.model === 'all' ? ['mel', 'final', 'small'] : ['mel', options.model];
   fs.mkdirSync(options.dir, { recursive: true });
   for (const key of wanted) {
     await ensure(options.dir, MODELS[key]);

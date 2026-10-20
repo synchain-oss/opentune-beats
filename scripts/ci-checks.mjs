@@ -19,7 +19,12 @@
 //   files                 AI attribution in every text file of the repository
 //   privacy               personal paths and e-mail addresses outside the project's own
 //   assets                audio and model files, by extension and by signature
-//   pull-request-target   the pull_request_target ban in .github/workflows/
+//   pull-request-target   the pull_request_target ban in .github/workflows/, matched as YAML
+//                         (a key, a flow-sequence element or a sequence item); comments and
+//                         prose that merely mention the name do not count
+//
+// The identity rules and the workflow scan are unit-tested by scripts/ci-checks.test.mjs
+// (`node --test scripts/ci-checks.test.mjs`).
 //
 // Needs only Node (>= 22) and git: it imports nothing outside scripts/ and installs nothing.
 
@@ -324,7 +329,7 @@ const GIT_LOG_FORMAT = '%H%x1f%P%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%B%x1e';
  * @returns {{ sha: string, parents: string[], name: string, email: string, committerName: string,
  *   committerEmail: string, body: string }[]}
  */
-function parseGitLog(text) {
+export function parseGitLog(text) {
   return text
     .split('\x1e')
     .map((record) => record.replace(/^\n+|\n+$/g, ''))
@@ -354,7 +359,7 @@ function isDependabotCommit(commit) {
  * @param {boolean} externalAuthor an outside contributor's own address is accepted
  * @returns {string[]}
  */
-function checkAuthor(commit, externalAuthor) {
+export function checkAuthor(commit, externalAuthor) {
   const where = `commit ${commit.sha.slice(0, 8)}`;
   const who = `"${commit.name} <${commit.email}>"`;
   const author = commit.email.toLowerCase();
@@ -385,7 +390,7 @@ function checkAuthor(commit, externalAuthor) {
  * @param {boolean} externalAuthor
  * @returns {string[]}
  */
-function checkCommitter(commit, externalAuthor) {
+export function checkCommitter(commit, externalAuthor) {
   const where = `commit ${commit.sha.slice(0, 8)}`;
   const who = `"${commit.committerName} <${commit.committerEmail}>"`;
   const committer = commit.committerEmail.toLowerCase();
@@ -410,7 +415,7 @@ function checkCommitter(commit, externalAuthor) {
  * @param {{ allowExternalAuthors?: boolean, allowDependabot?: boolean }} [options]
  * @returns {string[]}
  */
-function checkCommits(commits, { allowExternalAuthors = false, allowDependabot = false } = {}) {
+export function checkCommits(commits, { allowExternalAuthors = false, allowDependabot = false } = {}) {
   const patterns = loadPatterns(path.join(ROOT, PATTERNS_FILE));
   const problems = [];
   for (const commit of commits) {
@@ -493,6 +498,17 @@ function commitScope() {
       reason: `manual run: commits not on ${defaultBranch}`,
     };
   }
+  if (event === 'workflow_call') {
+    // A reusable workflow keeps the caller's event for the rest of the context, but the name is
+    // reported as `workflow_call` in some situations. Treat it like a manual run: the commits
+    // that are not on the default branch, held to project identities.
+    return {
+      base: `origin/${defaultBranch}`,
+      allowExternalAuthors: false,
+      allowDependabot: false,
+      reason: `called workflow: commits not on ${defaultBranch}`,
+    };
+  }
   if (event === 'pull_request') {
     if (!baseRef) throw new Error('pull request without a base branch');
     const base = `origin/${baseRef}`;
@@ -540,6 +556,40 @@ function checkBranchRule({ baseRef, headRef, headRepo, repo }) {
     return [`only feat/*, feature/* or dependabot/* branches may be merged into dev (found "${headRef}")`];
   }
   return [];
+}
+
+// ---------------------------------------------------------------------------------------------
+// Workflows
+
+/**
+ * The 1-based line numbers at which a workflow file mentions the banned trigger as YAML, not as
+ * prose. The line's comment is removed first, so a comment that forbids the trigger does not
+ * count, and the code of every line is then matched as one string so that a flow sequence split
+ * over several lines is still one sequence:
+ *
+ *     on: [push,
+ *          pull_request_target]      -> a match
+ *     on:
+ *       - pull_request_target       -> a match
+ *     "pull_request_target": ...    -> a match
+ *     # never use pull_request_target  -> no match
+ *     name: no pull_request_target here -> no match (prose, not a key or a sequence item)
+ *
+ * @param {string} text
+ * @returns {number[]}
+ */
+export function pullRequestTargetLines(text) {
+  const lines = text.split('\n');
+  const code = lines.map((line) => line.replace(/(^|\s)#.*$/, '')).join('\n');
+  const key = /^[ \t]*["']?pull_request_target["']?[ \t]*:/gm;
+  const item = /^[ \t]*-[ \t]*["']?pull_request_target["']?[ \t]*$/gm;
+  const flow = /[[{,][ \t\n]*["']?pull_request_target["']?[ \t\n]*(?=[\]},:])/g;
+  const found = new Set();
+  const add = (index) => found.add(code.slice(0, index).split('\n').length);
+  for (const match of code.matchAll(key)) add(match.index);
+  for (const match of code.matchAll(item)) add(match.index);
+  for (const match of code.matchAll(flow)) add(match.index + match[0].indexOf('pull_request_target'));
+  return [...found].sort((left, right) => left - right);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -628,20 +678,15 @@ const CHECKS = {
 
   'pull-request-target'() {
     const dir = path.join(ROOT, '.github', 'workflows');
-    // A whole-line test after the YAML comment is removed: the name as a bare or quoted token
-    // that ends a key (`pull_request_target:`), a scalar, a sequence item or a flow-sequence
-    // element (`on: [push, pull_request_target]`). Prose that merely mentions the name (a review
-    // prompt that forbids it) is followed by other text and does not match.
-    const re = /(^|[\s[,{'"])pull_request_target(['"]?\s*([:,\]}]|$))/;
     const problems = [];
     let scanned = 0;
     for (const name of fs.readdirSync(dir).filter((n) => /\.ya?ml$/.test(n))) {
       const text = fs.readFileSync(path.join(dir, name), 'utf8');
       scanned += 1;
-      text.split('\n').forEach((line, i) => {
-        const code = line.replace(/(^|\s)#.*$/, '');
-        if (re.test(code)) problems.push(`.github/workflows/${name}:${i + 1}: ${line.trim()}`);
-      });
+      const lines = text.split('\n');
+      for (const line of pullRequestTargetLines(text)) {
+        problems.push(`.github/workflows/${name}:${line}: ${lines[line - 1].trim()}`);
+      }
     }
     return report('pull_request_target', problems, `${scanned} workflow file(s): no pull_request_target`);
   },
@@ -676,14 +721,18 @@ const CHECKS = {
 
 const name = process.argv[2] ?? '';
 const check = Object.hasOwn(CHECKS, name) ? CHECKS[name] : undefined;
-if (!check || process.argv.length > 3) {
-  log(`usage: node scripts/ci-checks.mjs <${Object.keys(CHECKS).join(' | ')}>`);
-  process.exitCode = 2;
-} else {
-  try {
-    process.exitCode = check();
-  } catch (error) {
-    log(`ci-checks ${name}: ${error instanceof Error ? error.message : String(error)}`);
+// Running as a command, not imported by a test: the same guard check-attribution.mjs uses.
+const isMain = process.argv[1] !== undefined && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  if (!check || process.argv.length > 3) {
+    log(`usage: node scripts/ci-checks.mjs <${Object.keys(CHECKS).join(' | ')}>`);
     process.exitCode = 2;
+  } else {
+    try {
+      process.exitCode = check();
+    } catch (error) {
+      log(`ci-checks ${name}: ${error instanceof Error ? error.message : String(error)}`);
+      process.exitCode = 2;
+    }
   }
 }

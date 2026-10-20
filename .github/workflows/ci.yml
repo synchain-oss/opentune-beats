@@ -4,9 +4,13 @@ name: CI
 
 # Build, test and compliance checks for the CLI.
 #
-# Triggers: a pull request into dev / prod / feature/**, a push to dev or feature/**, and a manual
-# run on any branch. Every job runs on every trigger: the suite is small (one crate, two targets)
-# and a check that only runs on some branches is a check that surprises you on the merge.
+# Triggers: a pull request into dev / prod / feature/**, a push to dev or feature/**, a manual
+# run on any branch, and a call from release.yml (`workflow_call`) before it packs a release.
+# Every job runs on every trigger, with one exception: a pull-request edit (`edited`) changes the
+# title or the body, not the commit, so only the text checks of the compliance job run again; the
+# build, licence and notices jobs are skipped. `beats-gate` accepts exactly that skip and nothing
+# else. The suite is small (one crate, two targets), and a check that only runs on some branches
+# is a check that surprises you on the merge.
 #
 # The single required check is `beats-gate`: it fails when any job below fails, was cancelled or
 # never ran. A required check must not be filtered by paths, and must not be skipped, so
@@ -23,16 +27,19 @@ on:
   push:
     branches: [dev, "feature/**"]
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
 
-# One group per pull request, so a new push cancels the run it supersedes. A push is grouped by
-# commit: grouping by branch would let a newer queued run replace an older one, and the commit in
-# between would then never have been checked.
+# One group per pull request and per kind of run. A push is grouped by commit: grouping by branch
+# would let a newer queued run replace an older one, and the commit in between would then never
+# have been checked. An edit skips the build jobs by its own `if:`, so it is grouped apart from
+# the run that builds the same commit: it can neither cancel that run (a queued run cancels a
+# pending one in its own group) nor be cancelled by it. Two edits supersede each other.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || format('{0}@{1}', github.ref, github.sha) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-${{ github.event.pull_request.number || format('{0}@{1}', github.ref, github.sha) }}-${{ github.event.action == 'edited' && 'text' || 'code' }}
+  cancel-in-progress: true
 
 defaults:
   run:
@@ -56,12 +63,23 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
+      # An `edited` pull request changes the title, the body or the base, never the commit, so
+      # only the checks that read one of those run again: the commit range (whose base changed)
+      # and the title and body check. `edited` without a changed base skips the rest.
+      #
       # The attribution checker and its pattern list are byte-identical copies of the
       # maintainer's canonical files; the pinned digests detect any local edit.
       - name: Attribution checker matches its pinned sha256
+        if: ${{ !cancelled() && github.event.action != 'edited' }}
         run: node scripts/ci-checks.mjs pins
+      # The identity rules and the workflow scan have fixed test cases; the tests need no event
+      # context, so they run here rather than on a pull request only.
+      - name: ci-checks unit tests
+        if: ${{ !cancelled() && github.event.action != 'edited' }}
+        run: node --test scripts/ci-checks.test.mjs
       - name: Commit range and identity rules
         id: scope
+        if: ${{ !cancelled() && (github.event.action != 'edited' || github.event.changes.base != null) }}
         env:
           EVENT_NAME: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref }}
@@ -75,7 +93,7 @@ jobs:
         run: node scripts/ci-checks.mjs scope >> "$GITHUB_OUTPUT"
       # Each check runs even when an earlier one failed, so one run reports every problem.
       - name: Commits (DCO, attribution, identity)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && (github.event.action != 'edited' || github.event.changes.base != null) }}
         env:
           EVENT_NAME: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref }}
@@ -88,16 +106,16 @@ jobs:
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: node scripts/ci-checks.mjs commits
       - name: Files carry no AI attribution
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && github.event.action != 'edited' }}
         run: node scripts/ci-checks.mjs files
       - name: No personal paths or e-mail addresses
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && github.event.action != 'edited' }}
         run: node scripts/ci-checks.mjs privacy
       - name: No audio or model files
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && github.event.action != 'edited' }}
         run: node scripts/ci-checks.mjs assets
       - name: No pull-request-target trigger
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && github.event.action != 'edited' }}
         run: node scripts/ci-checks.mjs pull-request-target
       # PR titles and bodies are untrusted text: they reach the checker through `env:`, never by
       # expanding `${{ }}` inside the script.
@@ -112,7 +130,7 @@ jobs:
       # commit, so the scan sees exactly the tracked files and nothing the job wrote (the tool
       # cache, the target directory).
       - name: gitleaks (tracked files and branch commits)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && github.event.action != 'edited' }}
         env:
           BASE: ${{ steps.scope.outputs.base }}
         run: |
@@ -131,6 +149,8 @@ jobs:
     name: rust (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    # An edit changes no commit: the build has nothing new to check.
+    if: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' }}
     strategy:
       fail-fast: false
       matrix:
@@ -190,26 +210,33 @@ jobs:
             target/aarch64-apple-darwin/release/opentune-beats \
             target/x86_64-apple-darwin/release/opentune-beats
           lipo -info target/opentune-beats
-      # Windows: the target is named explicitly so that build scripts and proc-macros are built
-      # for the host without `+crt-static`; only the final binary gets the static CRT from
-      # `.cargo/config.toml`.
+      # Windows: `--target` names the target explicitly, so build scripts and proc-macros are
+      # built for the host and do not get `+crt-static`; only the final binary gets the static CRT
+      # from `.cargo/config.toml`.
       - name: Build (Windows, static CRT)
         if: matrix.name == 'windows-x64'
         shell: bash
         run: |
           cargo build --release --locked --target x86_64-pc-windows-msvc
           cp target/x86_64-pc-windows-msvc/release/opentune-beats.exe target/opentune-beats.exe
-      # The binary must run on a bare runner: it is what a user downloads.
+      # The binary must run on a bare runner: it is what a user downloads. The JSON structure is
+      # checked field by field, and the version it reports must be the manifest version.
       - name: Smoke test the release binary
         shell: bash
         run: |
           "${{ matrix.binary }}" --version
-          "${{ matrix.binary }}" version --json | jq -e '
-            .name == "opentune-beats"
-            and .schemaVersion == 1
-            and (.beatThis != null)
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          "${{ matrix.binary }}" version --json | jq -e --arg version "$version" '
+            (.name == "opentune-beats")
+            and (.version == $version)
+            and (.beatThis | type) == "string"
+            and ((.beatThis | length) > 0)
+            and (.schemaVersion == 1)
             and ((.models | keys) == ["final", "mel", "small"])
-            and all(.models[]; (.file | type) == "string" and (.sha256 | length) == 64)'
+            and (.models.final.file == "beat_this_final.onnx")
+            and (.models.small.file == "beat_this_small.onnx")
+            and (.models.mel.file == "mel_spectrogram.onnx")
+            and (all(.models[]; ((.file | type) == "string") and (.sha256 | test("^[0-9a-f]{64}$"))))'
       - name: SHA-256 of the binary
         shell: bash
         run: |
@@ -232,6 +259,8 @@ jobs:
     name: licenses
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # An edit changes no commit: the policy check cannot differ either.
+    if: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -254,6 +283,33 @@ jobs:
           "$tool" --version
           "$tool" --locked check licenses bans sources advisories
 
+  # THIRD-PARTY-NOTICES is generated, and it ships inside both release archives: the tracked copy
+  # must be exactly what the dependency graph of the release targets produces. `cargo fetch`
+  # unpacks the crate packages, whose license files the generator reads; nothing is downloaded by
+  # the generator itself.
+  notices:
+    name: notices
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Install the pinned Rust toolchain
+        shell: bash
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --no-self-update
+          rustup default "$channel"
+      - name: Fetch the crates in Cargo.lock
+        run: cargo fetch --locked
+      - name: THIRD-PARTY-NOTICES matches the release dependency graph
+        run: node scripts/gen-notices.mjs --check
+
   # The synthetic acceptance check: the beat grid is compared with the tempo map the audio was
   # rendered from. The audio is generated on the runner and never committed; the model files are
   # fetched from their pinned URLs and verified against the SHA-256 in the binary. Every map under
@@ -264,6 +320,7 @@ jobs:
     name: accuracy (synthetic)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    if: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -323,10 +380,15 @@ jobs:
           exit "$status"
 
   # The only required check. Every job above must have succeeded; a skipped or cancelled job is a
-  # failure here, so a required check can never pass because a job silently did not run.
+  # failure here, so a required check can never pass because a job silently did not run. The one
+  # accepted skip is an `edited` pull request: an edit changes no commit, the build, licence and
+  # notices jobs skip by their own `if:`, and the compliance job re-runs the checks that read the
+  # title, the body or the base. The edited run is in its own concurrency group (see above), so it
+  # cannot have cancelled the run that builds the same commit; that run's gate replaces this one
+  # when it finishes, and a failing build still blocks the pull request.
   beats-gate:
     name: beats-gate
-    needs: [compliance, rust, licenses, accuracy]
+    needs: [compliance, rust, licenses, notices, accuracy]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -334,18 +396,30 @@ jobs:
       - name: Every job succeeded
         env:
           NEEDS: ${{ toJSON(needs) }}
+          EVENT_NAME: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
         run: |
           status=0
-          for job in compliance rust licenses accuracy; do
+          edited_pr=false
+          if [ "$EVENT_NAME" = "pull_request" ] && [ "$ACTION" = "edited" ]; then
+            edited_pr=true
+          fi
+          for job in compliance rust licenses notices accuracy; do
             result=$(jq -r --arg job "$job" '.[$job].result // "missing"' <<< "$NEEDS")
             echo "$job: $result"
+            # An edit skips the build and licence jobs on purpose; the commit itself was checked
+            # by the run that this one did not cancel.
+            if [ "$result" = "skipped" ] && [ "$edited_pr" = true ] && [ "$job" != "compliance" ]; then
+              echo "$job: skipped on a pull-request edit (the commit did not change)"
+              continue
+            fi
             if [ "$result" != success ]; then
               echo "::error::$job: $result (must succeed)"
               status=1
             fi
           done
           # A job added to `needs` but not to the list above would otherwise never be checked.
-          listed=" compliance rust licenses accuracy "
+          listed=" compliance rust licenses notices accuracy "
           for job in $(jq -r 'keys[]' <<< "$NEEDS"); do
             case "$listed" in
               *" $job "*) ;;

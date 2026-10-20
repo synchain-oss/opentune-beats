@@ -49,7 +49,9 @@ OpenTune 工程只有一个速度。分段的 tempo map 用来修正人声节奏
 
 ## 平台
 
-CI 构建 Windows x64 与 macOS（universal2）两种二进制。
+CI 构建 Windows x64 与 macOS（universal2）两种二进制。发布资产——两个压缩包、三个模型文件与
+`SHA256SUMS`——见 [Releases](https://github.com/synchain-oss/opentune-beats/releases) 页面；
+发版流程见 [docs/RELEASE.md](docs/RELEASE.md)。
 
 ## 许可
 

@@ -64,7 +64,10 @@ annotations and the generation scripts, never audio.
 
 ## Platforms
 
-CI builds Windows x64 and macOS (universal2) binaries.
+CI builds Windows x64 and macOS (universal2) binaries. Release assets — the two archives, the
+three model files and `SHA256SUMS` — are on the
+[Releases](https://github.com/synchain-oss/opentune-beats/releases) page; see
+[docs/RELEASE.md](docs/RELEASE.md) for how a release is built.
 
 ## License
 
