@@ -350,26 +350,25 @@ fn run_analyze(options: &AnalyzeOptions) -> (u8, String, String) {
     }
 }
 
-/// The exit code when stdout could not be written. Only an `analyze` run that had succeeded, whose
-/// result was therefore lost, becomes a failure; a closed pipe on `version` or `--help`, and a
-/// command that had already failed (usage error 2, input error 4, ...), keep their own code.
-fn exit_after_write_failure(code: u8, is_analyze: bool) -> u8 {
-    if is_analyze && code == EXIT_OK {
-        EXIT_ANALYSIS_FAILURE
-    } else {
-        code
-    }
+/// The exit code when stdout could not be written. It is always 5: the result the caller asked
+/// for was lost, whatever the command was and whatever code the run had reached
+/// (`docs/output.md`, section 3).
+fn exit_after_write_failure() -> u8 {
+    EXIT_ANALYSIS_FAILURE
 }
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    let is_analyze = args.first().is_some_and(|arg| arg == "analyze");
-    let (mut code, stdout, stderr) = run(args);
+    let (mut code, stdout, mut stderr) = run(args);
     if !stdout.is_empty() {
         let mut out = io::stdout().lock();
         let wrote = out.write_all(stdout.as_bytes()).is_ok() && out.flush().is_ok();
         if !wrote {
-            code = exit_after_write_failure(code, is_analyze);
+            code = exit_after_write_failure();
+            stderr.push_str(&format!(
+                "{name}: the result could not be written to stdout\n",
+                name = NAME
+            ));
         }
     }
     if !stderr.is_empty() {
@@ -577,15 +576,9 @@ mod tests {
     }
 
     #[test]
-    fn only_a_successful_analyze_fails_when_stdout_is_lost() {
-        assert_eq!(
-            exit_after_write_failure(EXIT_OK, true),
-            EXIT_ANALYSIS_FAILURE
-        );
-        assert_eq!(exit_after_write_failure(EXIT_OK, false), EXIT_OK);
-        assert_eq!(exit_after_write_failure(EXIT_USAGE, true), EXIT_USAGE);
-        assert_eq!(exit_after_write_failure(4, true), 4);
-        assert_eq!(exit_after_write_failure(3, true), 3);
+    fn a_lost_stdout_is_exit_five() {
+        assert_eq!(exit_after_write_failure(), EXIT_ANALYSIS_FAILURE);
+        assert_eq!(EXIT_ANALYSIS_FAILURE, 5);
     }
 
     #[test]

@@ -256,7 +256,10 @@ jobs:
 
   # The synthetic acceptance check: the beat grid is compared with the tempo map the audio was
   # rendered from. The audio is generated on the runner and never committed; the model files are
-  # fetched from their pinned URLs and verified against the SHA-256 in the binary.
+  # fetched from their pinned URLs and verified against the SHA-256 in the binary. Every map under
+  # bench/ is rendered and scored separately: `bench/tempo-map.json` keeps the beat gate, and the
+  # maps in `bench/maps/` add the tempo-map gate (segment count, per-segment BPM, steady-material
+  # confidence, and the refined inter-beat spread) declared by their `acceptance` object.
   accuracy:
     name: accuracy (synthetic)
     runs-on: ubuntu-latest
@@ -286,19 +289,38 @@ jobs:
       - name: Build the release binary
         shell: bash
         run: cargo build --release --locked
-      - name: Render the synthetic backing track
+      # One render and one analysis per map, into a directory named after the map. Both steps stop
+      # at the first failure: a missing render would only be reported again by the scorer.
+      - name: Render the synthetic backing tracks
         shell: bash
-        run: node bench/gen.mjs --out "$RUNNER_TEMP/bench.wav"
-      - name: Analyze it
+        run: |
+          mkdir -p "$RUNNER_TEMP/bench"
+          for map in bench/tempo-map.json bench/maps/*.json; do
+            name=$(basename "$map" .json)
+            node bench/gen.mjs --map "$map" --out "$RUNNER_TEMP/bench/$name.wav"
+          done
+      - name: Analyze them
         shell: bash
-        run: >-
-          ./target/release/opentune-beats analyze "$RUNNER_TEMP/bench.wav" --models-dir models
-          > "$RUNNER_TEMP/analysis.json"
-      # Fails the job when the median error is above 5 ms, the p95 above 15 ms or the +/-70 ms
-      # F-measure below 0.95, and writes the numbers to the run summary either way.
-      - name: Score against the tempo map
+        run: |
+          for map in bench/tempo-map.json bench/maps/*.json; do
+            name=$(basename "$map" .json)
+            ./target/release/opentune-beats analyze "$RUNNER_TEMP/bench/$name.wav" --models-dir models \
+              > "$RUNNER_TEMP/bench/$name.json"
+          done
+      # Every material is scored even when an earlier one failed, so one run reports every
+      # problem. The job fails when any enabled gate of any material fails.
+      - name: Score against the tempo maps
         shell: bash
-        run: node bench/score.mjs --analysis "$RUNNER_TEMP/analysis.json" --summary "$GITHUB_STEP_SUMMARY"
+        run: |
+          status=0
+          for map in bench/tempo-map.json bench/maps/*.json; do
+            name=$(basename "$map" .json)
+            echo "::group::$name"
+            node bench/score.mjs --map "$map" --analysis "$RUNNER_TEMP/bench/$name.json" \
+              --summary "$GITHUB_STEP_SUMMARY" || status=1
+            echo "::endgroup::"
+          done
+          exit "$status"
 
   # The only required check. Every job above must have succeeded; a skipped or cancelled job is a
   # failure here, so a required check can never pass because a job silently did not run.

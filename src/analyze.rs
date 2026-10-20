@@ -17,6 +17,11 @@ pub const FRAME_SEC: f64 = 0.02;
 pub const MAX_REFINE_MS: f64 = 30.0;
 /// Below this duration there is nothing to fit a grid to.
 const MIN_DURATION_SEC: f64 = 0.5;
+/// The largest input file the decoder accepts, in bytes. The whole file is read into memory and
+/// decoded to f32 mono, so an unbounded read is an unbounded allocation; 2 GiB is about three
+/// hours of 48 kHz stereo float audio, far beyond a backing track, and still fits the address
+/// space of a 64-bit release build with room for the decoded samples.
+const MAX_INPUT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 const EXIT_MODEL: u8 = 3;
 const EXIT_INPUT: u8 = 4;
@@ -72,6 +77,30 @@ pub struct Request<'a> {
 
 /// Runs the pipeline and returns the JSON document (without the trailing newline).
 pub fn run(request: &Request<'_>) -> Result<String, Failure> {
+    // The size is checked before the read, so a huge or special file cannot turn into an
+    // unbounded allocation. The file can still grow between this check and the read; the read
+    // itself then fails or the decoder rejects the truncated result, which is an input error
+    // either way.
+    let metadata = std::fs::metadata(request.input).map_err(|error| {
+        Failure::new(
+            "INPUT_UNREADABLE",
+            EXIT_INPUT,
+            "the input cannot be read",
+            format!("{}: {error}", request.input.display()),
+        )
+    })?;
+    if over_input_limit(metadata.len()) {
+        return Err(Failure::new(
+            "INPUT_UNREADABLE",
+            EXIT_INPUT,
+            "the input is larger than the supported limit",
+            format!(
+                "{}: {} bytes (limit {MAX_INPUT_BYTES})",
+                request.input.display(),
+                metadata.len()
+            ),
+        ));
+    }
     let bytes = std::fs::read(request.input).map_err(|error| {
         Failure::new(
             "INPUT_UNREADABLE",
@@ -104,6 +133,13 @@ pub fn run(request: &Request<'_>) -> Result<String, Failure> {
     verify(&melodic, &models::MEL)?;
     verify(&trained, request.model.file())?;
 
+    // The digest is computed from the file, and `BeatThis::new` then loads the model from its
+    // path, so a file replaced between the two reads would be loaded unchecked. That window is
+    // accepted here on purpose: beat-this 1.1 exposes models only through
+    // `Runtime::load_model(&Path)` (its `RtenModel` wrapper and its input/output name map are
+    // private), and loading bytes ourselves would mean reimplementing that wrapper against
+    // `rten` directly. The models directory is a local, user-owned directory that the release
+    // installs once; the digest still catches a truncated, corrupted or swapped download.
     let runtime = RtenRuntime;
     let mut tracker = BeatThis::new(&runtime, &melodic, &trained).map_err(|error| {
         Failure::new(
@@ -227,6 +263,11 @@ fn file_name(input: &Path) -> String {
     }
 }
 
+/// True when a file of this size is past the limit the decoder accepts.
+fn over_input_limit(len: u64) -> bool {
+    len > MAX_INPUT_BYTES
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,5 +303,12 @@ mod tests {
         assert!(confidence_at(&[8.0], 0.0) > 0.99);
         assert!(confidence_at(&[-8.0], 0.0) < 0.01);
         assert!((confidence_at(&[], 1.0) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn an_input_past_the_size_limit_is_refused() {
+        assert!(!over_input_limit(0));
+        assert!(!over_input_limit(MAX_INPUT_BYTES));
+        assert!(over_input_limit(MAX_INPUT_BYTES + 1));
     }
 }

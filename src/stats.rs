@@ -57,18 +57,22 @@ pub fn weighted_median(values: &[(f64, f64)]) -> f64 {
     sorted[sorted.len() - 1].0
 }
 
-/// Least squares `time = offset + index * period` for a run of beats.
-pub fn fit(times: &[f64]) -> Option<(f64, f64)> {
-    if times.len() < 2 {
+/// Least squares `time = offset + index * period` for beats at explicit grid indices.
+///
+/// The index of a beat is not always its position in the slice: when the model reports no beat
+/// during a breakdown, the beat after the gap is several periods later. The caller passes the
+/// grid index it computed for every beat, so one missing beat does not bend the fitted tempo.
+pub fn fit_indexed(indices: &[f64], times: &[f64]) -> Option<(f64, f64)> {
+    if indices.len() != times.len() || indices.len() < 2 {
         return None;
     }
-    let mean_index = (times.len() as f64 - 1.0) / 2.0;
+    let mean_index = mean(indices);
     let mean_time = mean(times);
     let mut covariance = 0.0;
     let mut variance = 0.0;
-    for (index, time) in times.iter().enumerate() {
-        let centered = index as f64 - mean_index;
-        covariance += centered * (*time - mean_time);
+    for (index, time) in indices.iter().zip(times.iter()) {
+        let centered = index - mean_index;
+        covariance += centered * (time - mean_time);
         variance += centered * centered;
     }
     if variance == 0.0 {
@@ -82,11 +86,11 @@ pub fn fit(times: &[f64]) -> Option<(f64, f64)> {
 }
 
 /// The absolute distance of each beat from the fitted grid, in milliseconds.
-pub fn residuals_ms(times: &[f64], offset: f64, period: f64) -> Vec<f64> {
+pub fn residuals_at_ms(indices: &[f64], times: &[f64], offset: f64, period: f64) -> Vec<f64> {
     let mut out = Vec::with_capacity(times.len());
-    for (index, time) in times.iter().enumerate() {
-        let grid = offset + index as f64 * period;
-        out.push((*time - grid).abs() * 1000.0);
+    for (index, time) in indices.iter().zip(times.iter()) {
+        let grid = offset + index * period;
+        out.push((time - grid).abs() * 1000.0);
     }
     out
 }
@@ -118,16 +122,33 @@ mod tests {
     #[test]
     fn fit_recovers_a_perfect_grid() {
         let times: Vec<f64> = (0..8).map(|index| 0.25 + index as f64 * 0.5).collect();
-        let (offset, period) = fit(&times).expect("fits");
+        let indices: Vec<f64> = (0..8).map(|index| index as f64).collect();
+        let (offset, period) = fit_indexed(&indices, &times).expect("fits");
         assert!((offset - 0.25).abs() < 1e-12);
         assert!((period - 0.5).abs() < 1e-12);
-        let residuals = residuals_ms(&times, offset, period);
+        let residuals = residuals_at_ms(&indices, &times, offset, period);
+        assert!(residuals.iter().all(|value| *value < 1e-6));
+    }
+
+    #[test]
+    fn fit_follows_the_grid_indices_across_a_gap() {
+        // Four beats at 0.5 s, a ten-beat gap, then four more at 0.5 s.
+        let mut indices = vec![0.0, 1.0, 2.0, 3.0];
+        let mut times: Vec<f64> = (0..4).map(|index| 0.5 + index as f64 * 0.5).collect();
+        for step in 4..14 {
+            indices.push(step as f64);
+            times.push(0.5 + step as f64 * 0.5);
+        }
+        let (offset, period) = fit_indexed(&indices, &times).expect("fits");
+        assert!((period - 0.5).abs() < 1e-12, "period {period}");
+        let residuals = residuals_at_ms(&indices, &times, offset, period);
         assert!(residuals.iter().all(|value| *value < 1e-6));
     }
 
     #[test]
     fn fit_needs_two_beats_and_a_rising_grid() {
-        assert!(fit(&[1.0]).is_none());
-        assert!(fit(&[1.0, 1.0]).is_none());
+        assert!(fit_indexed(&[0.0], &[1.0]).is_none());
+        assert!(fit_indexed(&[0.0, 1.0], &[1.0, 1.0]).is_none());
+        assert!(fit_indexed(&[0.0], &[1.0, 2.0]).is_none());
     }
 }
