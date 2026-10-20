@@ -199,8 +199,9 @@ against.
 
 ## 5. Release assets
 
-This section documents the contract that the release workflow will implement; nothing is
-released yet.
+This section documents the contract that the release workflow
+([`.github/workflows/release.yml`](../.github/workflows/release.yml), described in
+[RELEASE.md](./RELEASE.md)) implements; no release has been published yet.
 
 | Asset | Contents |
 | --- | --- |

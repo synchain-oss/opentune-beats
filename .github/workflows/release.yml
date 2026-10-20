@@ -1,0 +1,458 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Synchain
+# SPDX-License-Identifier: MIT
+name: Release
+
+# Build, verify and pack a release of the CLI.
+#
+# Triggers:
+#   * a push of a version tag `v*`: build, verify, pack, and create a DRAFT release. The
+#     maintainer reviews the draft and publishes it; this workflow never publishes one.
+#   * workflow_dispatch, on any branch: a dry run. It builds, verifies, packs and uploads
+#     everything as workflow artifacts, and creates no release.
+#
+# A tag must name the version in Cargo.toml and point at a commit on prod. The full CI suite runs
+# through `workflow_call` (ci.yml: fmt, clippy, tests, compliance, licences, notices and the
+# accuracy bench), in parallel with the builds; the draft release needs both, so a release is
+# never created from a commit, or from an asset set, that did not pass.
+#
+# Permissions: everything runs with `contents: read`; only the job that creates the draft release
+# asks for `contents: write`, and it runs on a tag push only.
+#
+# The asset names are the release contract (docs/output.md, section 5) and the caller's manifest:
+#   opentune-beats-<version>-win-x64.zip
+#   opentune-beats-<version>-macos-universal2.tar.gz
+#   mel_spectrogram.onnx, beat_this_final.onnx, beat_this_small.onnx
+#   SHA256SUMS
+# The Windows archive is written with explicit forward-slash entry names, and both archives are
+# listed again after packing to assert that: the caller rejects a zip entry with a backslash.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A release run is never cancelled: a second tag while one is building queues behind it, and a
+# dry run must not cancel a run that is about to create a draft.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    # Explicit bash: on Windows this is the only way to get -eo pipefail, so a failure inside a
+    # pipeline is not swallowed. The archive step asks for pwsh explicitly.
+    shell: bash
+
+jobs:
+  preflight:
+    name: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      dry_run: ${{ steps.version.outputs.dry_run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # The version in Cargo.toml is the single source of truth. A tag names it, and the tag must
+      # point at a commit on prod, the only branch releases are built from.
+      - name: Check the tag against Cargo.toml and prod
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ -z "$version" ]; then
+            echo "::error::Cargo.toml has no package version"
+            exit 1
+          fi
+          # Releases are final versions only: release-notes.mjs accepts x.y.z and nothing else, so
+          # fail here, before anything is built.
+          if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Cargo.toml version $version is not x.y.z (pre-release versions are not released)"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$REF_TYPE" != "tag" ]; then
+            echo "tag=v$version" >> "$GITHUB_OUTPUT"
+            echo "dry_run=true" >> "$GITHUB_OUTPUT"
+            echo "dry run on $REF_NAME: everything is packed, no release is created"
+            exit 0
+          fi
+          if [ "$REF_NAME" != "v$version" ]; then
+            echo "::error::tag $REF_NAME does not name the Cargo.toml version v$version"
+            exit 1
+          fi
+          git fetch --no-tags origin prod
+          if ! git merge-base --is-ancestor HEAD origin/prod; then
+            echo "::error::$REF_NAME does not point at a commit on prod"
+            exit 1
+          fi
+          echo "tag=$REF_NAME" >> "$GITHUB_OUTPUT"
+          echo "dry_run=false" >> "$GITHUB_OUTPUT"
+
+  checks:
+    name: CI checks
+    needs: preflight
+    uses: ./.github/workflows/ci.yml
+    # `release_call` gives the called run its own concurrency group (it must not cancel, or be
+    # cancelled by, the push run of the same commit) and its release commit scope.
+    with:
+      release_call: true
+
+  build-windows:
+    name: build (windows-x64)
+    needs: preflight
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        shell: bash
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --no-self-update
+          rustup default "$channel"
+          rustc --version
+          cargo --version
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-registry-${{ runner.os }}-
+      # `--target` names the target explicitly, so build scripts and proc-macros are built for the
+      # host and do not get `+crt-static`; only the binary gets the static CRT from
+      # `.cargo/config.toml`, which is what makes the download run without the VC++ runtime.
+      - name: Build the release binary (static CRT)
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+      - name: Smoke test the binary
+        run: |
+          binary=target/x86_64-pc-windows-msvc/release/opentune-beats.exe
+          "$binary" --version
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          "$binary" version --json > "$RUNNER_TEMP/version-win-x64.json"
+          jq -e --arg version "$version" '
+            (.name == "opentune-beats") and (.version == $version) and (.schemaVersion == 1)' \
+            "$RUNNER_TEMP/version-win-x64.json"
+      # The executable sits at the root of the archive together with the licence files. Entries
+      # are named one by one (never a recursive add), so every name is a plain name with no
+      # separator and the caller's no-backslash rule holds by construction; the archive is listed
+      # again afterwards and the rule is asserted, not assumed.
+      - name: Pack the Windows archive
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName System.IO.Compression
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $asset = Join-Path $env:RUNNER_TEMP "opentune-beats-$env:VERSION-win-x64.zip"
+          $stage = Join-Path $env:RUNNER_TEMP 'win-x64'
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          Copy-Item 'target/x86_64-pc-windows-msvc/release/opentune-beats.exe' $stage
+          Copy-Item 'LICENSE', 'NOTICE', 'THIRD-PARTY-NOTICES' $stage
+          $names = @('opentune-beats.exe', 'LICENSE', 'NOTICE', 'THIRD-PARTY-NOTICES')
+          $zip = [System.IO.Compression.ZipFile]::Open($asset, 'Create')
+          try {
+            foreach ($name in $names) {
+              [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                $zip, (Join-Path $stage $name), $name,
+                [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+            }
+          } finally {
+            $zip.Dispose()
+          }
+          $read = [System.IO.Compression.ZipFile]::OpenRead($asset)
+          try {
+            $entries = @($read.Entries | ForEach-Object { $_.FullName })
+          } finally {
+            $read.Dispose()
+          }
+          $entries | ForEach-Object { Write-Output "entry: $_" }
+          $bad = @($entries | Where-Object { $_ -like '*\*' })
+          if ($bad.Count -gt 0) { throw "zip entry with a backslash: $($bad -join ', ')" }
+          if (Compare-Object $names $entries) { throw "unexpected zip entries: $($entries -join ', ')" }
+          Get-Item $asset | Select-Object Name, Length
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-win-x64
+          path: ${{ runner.temp }}/opentune-beats-${{ needs.preflight.outputs.version }}-win-x64.zip
+          if-no-files-found: error
+          retention-days: 14
+      # The model digests the binary reports; the package job compares them with the files that
+      # ship. A small JSON file for the workflow only, never a release asset.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: version-json-win-x64
+          path: ${{ runner.temp }}/version-win-x64.json
+          if-no-files-found: error
+          retention-days: 14
+
+  build-macos:
+    name: build (macos-universal2)
+    needs: preflight
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        shell: bash
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --no-self-update
+          rustup default "$channel"
+          rustc --version
+          cargo --version
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-registry-${{ runner.os }}-
+      # Both slices are built and merged with lipo, exactly as the CI build does.
+      - name: Build both architectures and merge them
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+          lipo -create -output "$RUNNER_TEMP/opentune-beats" \
+            target/aarch64-apple-darwin/release/opentune-beats \
+            target/x86_64-apple-darwin/release/opentune-beats
+          lipo -info "$RUNNER_TEMP/opentune-beats"
+      - name: Smoke test the binary
+        run: |
+          "$RUNNER_TEMP/opentune-beats" --version
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          "$RUNNER_TEMP/opentune-beats" version --json > "$RUNNER_TEMP/version-macos-universal2.json"
+          jq -e --arg version "$version" '
+            (.name == "opentune-beats") and (.version == $version) and (.schemaVersion == 1)' \
+            "$RUNNER_TEMP/version-macos-universal2.json"
+      # The files sit at the root of the archive (no `./` prefix) and the executable keeps its
+      # mode. `tar -tvzf` is the assertion, not a copy of it from the staging directory.
+      # The runner's tar is bsdtar (libarchive): COPYFILE_DISABLE=1 and --no-mac-metadata keep
+      # AppleDouble `._*` entries and extended attributes out of the archive, and the owner is
+      # fixed to root with no name, so the archive does not carry the runner's user. The `._*`
+      # entries are rejected by the exact entry list below, not assumed away.
+      - name: Pack the macOS archive
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          asset="$RUNNER_TEMP/opentune-beats-$VERSION-macos-universal2.tar.gz"
+          stage="$RUNNER_TEMP/macos-universal2"
+          mkdir -p "$stage"
+          cp "$RUNNER_TEMP/opentune-beats" "$stage/opentune-beats"
+          chmod 755 "$stage/opentune-beats"
+          cp LICENSE NOTICE THIRD-PARTY-NOTICES "$stage/"
+          COPYFILE_DISABLE=1 tar --no-mac-metadata --no-xattrs --uid 0 --gid 0 --uname '' --gname '' \
+            -czf "$asset" -C "$stage" opentune-beats LICENSE NOTICE THIRD-PARTY-NOTICES
+          gzip -t "$asset"
+          tar -tvzf "$asset"
+          expected=$(printf '%s\n' LICENSE NOTICE THIRD-PARTY-NOTICES opentune-beats | sort)
+          actual=$(tar -tzf "$asset" | sort)
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::unexpected entries in $asset"
+            exit 1
+          fi
+          if ! tar -tvzf "$asset" | grep -Eq '^-rwxr-xr-x[[:space:]].*[[:space:]]opentune-beats$'; then
+            echo "::error::opentune-beats is not executable inside $asset"
+            exit 1
+          fi
+          if tar -tzf "$asset" | grep -F '\' > /dev/null; then
+            echo "::error::an entry of $asset contains a backslash"
+            exit 1
+          fi
+          ls -l "$asset"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-macos-universal2
+          path: ${{ runner.temp }}/opentune-beats-${{ needs.preflight.outputs.version }}-macos-universal2.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: version-json-macos-universal2
+          path: ${{ runner.temp }}/version-macos-universal2.json
+          if-no-files-found: error
+          retention-days: 14
+
+  # The three model files are platform independent and ship as their own assets. They are
+  # downloaded from the pinned URLs and each one is verified against the SHA-256 in
+  # scripts/fetch-models.mjs before it is uploaded; nothing else is done to them.
+  models:
+    name: models
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Fetch and verify the pinned models
+        run: |
+          node scripts/fetch-models.mjs --dir "$RUNNER_TEMP/models" --model all
+          cd "$RUNNER_TEMP/models"
+          sha256sum mel_spectrogram.onnx beat_this_final.onnx beat_this_small.onnx
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-models
+          path: ${{ runner.temp }}/models/*.onnx
+          if-no-files-found: error
+          retention-days: 14
+
+  # One place that knows the final asset set: the digests, the release body and the dry-run
+  # summary. The body is checked against the attribution rules here, before anything is published.
+  package:
+    name: package
+    needs: [preflight, build-windows, build-macos, models]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      # The three artifacts are named one by one: a pattern such as `release-*` would also match
+      # the `release-assets` artifact this job uploads, which a re-run would then pull back in.
+      - name: Collect the Windows archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-win-x64
+          path: dist
+      - name: Collect the macOS archive
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-macos-universal2
+          path: dist
+      - name: Collect the models
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-models
+          path: dist
+      # The model digests exist in two places: compiled into each binary (`version --json`) and
+      # in the files that ship. They must agree, or a downloader that trusts the binary's digests
+      # would reject, or accept, the wrong file.
+      - name: Collect the digests the binaries report
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: version-json-*
+          path: reported
+      - name: The binaries report the digests of the shipped models
+        run: |
+          status=0
+          for report in reported/version-json-win-x64/version-win-x64.json \
+                        reported/version-json-macos-universal2/version-macos-universal2.json; do
+            for key in mel small final; do
+              file=$(jq -r --arg key "$key" '.models[$key].file' "$report")
+              reported_sha=$(jq -r --arg key "$key" '.models[$key].sha256' "$report")
+              actual_sha=$(sha256sum "dist/$file" | cut -d' ' -f1)
+              if [ "$reported_sha" = "$actual_sha" ]; then
+                echo "ok: $report $key $file $actual_sha"
+              else
+                echo "::error::$report: $key ($file) reports $reported_sha, the shipped file is $actual_sha"
+                status=1
+              fi
+            done
+          done
+          exit "$status"
+      - name: SHA256SUMS and the release body
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          ls -l dist
+          node scripts/release-notes.mjs --version "$VERSION" --assets dist \
+            --sums dist/SHA256SUMS --out dist/release-notes.md
+          # The body is published verbatim: it must pass the attribution rules first.
+          node scripts/check-attribution.mjs dist/release-notes.md
+          (cd dist && sha256sum -c SHA256SUMS)
+      - name: Upload the release assets
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-assets
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Dry run summary
+        if: ${{ needs.preflight.outputs.dry_run == 'true' }}
+        run: |
+          {
+            echo "### Dry run"
+            echo
+            echo "No release was created. The verified assets are the \`release-assets\` artifact of"
+            echo "this run; a real release only happens on a \`v*\` tag pushed to \`prod\`."
+            echo
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The only job with write access, and it runs on a version tag only. The action creates the
+  # release as a draft: the maintainer checks the assets and publishes it, which no workflow does.
+  release:
+    name: release (draft)
+    needs: [preflight, checks, package]
+    if: ${{ needs.preflight.outputs.dry_run == 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Download the verified assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-assets
+          path: dist
+      # The artifact travelled through the workflow store: regenerate the digests and the body
+      # from the downloaded files and require them to be identical before anything is published.
+      - name: Re-check the assets
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          (cd dist && sha256sum -c SHA256SUMS)
+          node scripts/release-notes.mjs --version "$VERSION" --assets dist \
+            --sums "$RUNNER_TEMP/SHA256SUMS.check" --out "$RUNNER_TEMP/release-notes.check.md"
+          diff -u "$RUNNER_TEMP/SHA256SUMS.check" dist/SHA256SUMS
+          diff -u "$RUNNER_TEMP/release-notes.check.md" dist/release-notes.md
+          node scripts/check-attribution.mjs dist/release-notes.md
+      - name: Create the draft release
+        uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.2
+        with:
+          tag_name: ${{ needs.preflight.outputs.tag }}
+          name: OpenTune Beats ${{ needs.preflight.outputs.tag }}
+          draft: true
+          prerelease: false
+          body_path: dist/release-notes.md
+          fail_on_unmatched_files: true
+          files: |
+            dist/opentune-beats-${{ needs.preflight.outputs.version }}-win-x64.zip
+            dist/opentune-beats-${{ needs.preflight.outputs.version }}-macos-universal2.tar.gz
+            dist/mel_spectrogram.onnx
+            dist/beat_this_final.onnx
+            dist/beat_this_small.onnx
+            dist/SHA256SUMS
