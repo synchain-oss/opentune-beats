@@ -220,8 +220,8 @@ so a release directory needs no arguments beyond the input file.
 The pipeline is fixed, and a stored result can be reproduced from `params` and `model`:
 
 1. **Input.** The file is read and decoded as WAV (PCM 8/16/24/32 or IEEE float 32, any sample
-   rate, any channel count up to 8, averaged to mono). A file larger than 2 GiB is refused before
-   it is read; a `data` chunk whose declared size is `0xFFFFFFFF` (a streaming writer) is read to
+   rate, any channel count up to 8, averaged to mono). A file larger than 2 GiB is refused, and at
+   most 2 GiB and one byte of it is ever read; a `data` chunk whose declared size is `0xFFFFFFFF` (a streaming writer) is read to
    the end of the file; RF64/BW64, which needs a 64-bit size field, is refused with a message that
    says so. A file that is not a readable WAV is
    `INPUT_UNREADABLE`; one shorter than half a second is `INPUT_TOO_SHORT`.
@@ -239,8 +239,8 @@ The pipeline is fixed, and a stored result can be reproduced from `params` and `
    that brings it closer to the local tempo line through its neighbouring beats. A segment adopts
    its refined times only when they are clearly better (the fit-residual p95, the interval spread
    or the distance to the attacks improves by at least 2 ms) and the interval spread does not grow
-   by more than the envelope's ~1 ms resolution; otherwise the segment keeps the model's times and
-   reports `refinement: "skipped"`. The beats are then put back in time order, clamped to
+   by more than 2 ms (twice the envelope's ~1 ms resolution); otherwise the segment keeps the
+   model's times and reports `refinement: "skipped"`. The beats are then put back in time order, clamped to
    `[0, durationSec]`, and a beat within 1 ms of the one before it is dropped. The numbers are
    reported in `refinement`; a silent input or `--no-refine` leaves `applied` false and adds
    `REFINE_SKIPPED`.

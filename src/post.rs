@@ -245,10 +245,7 @@ pub fn build(
     let mut reported_before = before;
     let mut reported_after = after;
     if refinement.applied && after > before + REFINE_SPREAD_SLACK_MS {
-        for beat in &mut beats {
-            beat.time = beat.raw;
-            beat.refined = false;
-        }
+        fall_back_to_raw(&mut beats, &mut refinement);
         beats = normalize(beats, settings.duration);
         let times: Vec<f64> = beats.iter().map(|beat| beat.time).collect();
         let raw_times: Vec<f64> = beats
@@ -368,6 +365,19 @@ pub fn build(
         warnings,
         dominant_bpm,
     })
+}
+
+/// Undo the refinement as a whole: every beat goes back to the model's time, and the offsets the
+/// rejected refinement reported are cleared so `globalOffsetMs` and the adjustment statistics
+/// read 0, as the output contract says when no segment adopted refined times.
+fn fall_back_to_raw(beats: &mut [Beat], refinement: &mut Refinement) {
+    for beat in beats.iter_mut() {
+        beat.time = beat.raw;
+        beat.refined = false;
+    }
+    refinement.global_offset_ms = 0.0;
+    refinement.median_adjust_ms = 0.0;
+    refinement.p95_adjust_ms = 0.0;
 }
 
 /// Put the refined beats back in time order inside `[0, duration]` and drop a beat that lands
@@ -1863,6 +1873,39 @@ mod tests {
         for (beat, time) in analysis.beats.iter().zip(before) {
             assert!((beat.time - time - 0.025).abs() < 0.002);
         }
+    }
+
+    #[test]
+    fn falling_back_to_raw_clears_the_reported_offsets() {
+        let mut beats: Vec<Beat> = (0..4)
+            .map(|index| Beat {
+                raw: index as f64 * 0.6,
+                time: index as f64 * 0.6 + 0.012,
+                confidence: 0.9,
+                refined: true,
+                is_downbeat: false,
+                bar: None,
+                beat_in_bar: None,
+                segment: 0,
+            })
+            .collect();
+        let mut refinement = Refinement {
+            applied: true,
+            global_offset_ms: 12.0,
+            median_adjust_ms: 3.0,
+            p95_adjust_ms: 7.0,
+            segments_applied: 1,
+            segments_skipped: 0,
+            ioi_spread_before_ms: 0.0,
+            ioi_spread_after_ms: 0.0,
+        };
+        fall_back_to_raw(&mut beats, &mut refinement);
+        assert!(beats
+            .iter()
+            .all(|beat| !beat.refined && beat.time == beat.raw));
+        assert_eq!(refinement.global_offset_ms, 0.0);
+        assert_eq!(refinement.median_adjust_ms, 0.0);
+        assert_eq!(refinement.p95_adjust_ms, 0.0);
     }
 
     #[test]
