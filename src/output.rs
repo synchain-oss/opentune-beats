@@ -34,7 +34,7 @@ pub fn document(context: &Document<'_>) -> Json {
     let low: Vec<Json> = analysis
         .segments
         .iter()
-        .filter(|segment| segment.confidence < 0.5)
+        .filter(|segment| segment.confidence < post::LOW_CONFIDENCE_THRESHOLD)
         .map(|segment| Json::count(segment.index))
         .collect();
     let mut downbeats = 0;
@@ -159,6 +159,16 @@ fn refinement_json(refinement: &post::Refinement) -> Json {
             Json::fixed(refinement.median_adjust_ms, 3),
         ),
         ("p95AdjustMs", Json::fixed(refinement.p95_adjust_ms, 3)),
+        ("segmentsApplied", Json::count(refinement.segments_applied)),
+        ("segmentsSkipped", Json::count(refinement.segments_skipped)),
+        (
+            "ioiSpreadBeforeMs",
+            Json::fixed(refinement.ioi_spread_before_ms, 3),
+        ),
+        (
+            "ioiSpreadAfterMs",
+            Json::fixed(refinement.ioi_spread_after_ms, 3),
+        ),
     ])
 }
 
@@ -186,6 +196,10 @@ fn segment_json(segment: &post::Segment) -> Json {
         Some(note) => Json::text(note),
         None => Json::null(),
     };
+    let gap = match segment.gap_after_sec {
+        Some(value) => Json::fixed(value, 4),
+        None => Json::null(),
+    };
     Json::object(vec![
         ("index", Json::count(segment.index)),
         ("startSec", Json::fixed(segment.start, 4)),
@@ -199,6 +213,8 @@ fn segment_json(segment: &post::Segment) -> Json {
         ("confidence", Json::fixed(segment.confidence, 4)),
         ("fitResidualMs", residuals),
         ("octaveNote", octave),
+        ("refinement", Json::text(segment.refinement)),
+        ("gapAfterSec", gap),
     ])
 }
 
@@ -231,6 +247,10 @@ mod tests {
                 global_offset_ms: 0.0,
                 median_adjust_ms: 0.0,
                 p95_adjust_ms: 0.0,
+                segments_applied: 0,
+                segments_skipped: 0,
+                ioi_spread_before_ms: 0.0,
+                ioi_spread_after_ms: 0.0,
             },
             warnings: Vec::new(),
             dominant_bpm: 0.0,
@@ -253,6 +273,7 @@ mod tests {
             raw: 0.5,
             time: 0.5,
             confidence: 0.9,
+            refined: false,
             is_downbeat: true,
             bar: Some(1),
             beat_in_bar: Some(1),
@@ -272,6 +293,8 @@ mod tests {
             residual_median_ms: 1.0,
             residual_p95_ms: 2.0,
             octave_note: None,
+            refinement: "skipped",
+            gap_after_sec: None,
         });
         let context = Document {
             model: &crate::models::FINAL,
@@ -290,6 +313,10 @@ mod tests {
         assert!(text.contains("\"fileName\":\"take1.wav\""));
         assert!(text.contains("\"isDownbeat\":true"));
         assert!(text.contains("\"octaveNote\":null"));
+        assert!(text.contains("\"refinement\":\"skipped\""));
+        assert!(text.contains("\"gapAfterSec\":null"));
+        assert!(text.contains("\"segmentsApplied\":0"));
+        assert!(text.contains("\"ioiSpreadBeforeMs\":0.000"));
         assert!(text.contains("\"dominantBpm\":0.000"));
         assert_eq!(text.lines().count(), 1);
     }

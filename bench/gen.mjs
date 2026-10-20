@@ -1,17 +1,29 @@
 #!/usr/bin/env node
 // Render the synthetic backing track for the accuracy check.
 //
-// A plain drum loop: kick on beats 1 and 3, snare on 2 and 4, closed hats on every eighth note
-// and a bass note per beat. A bare click track is not music to the beat model and makes it lose
-// the tempo after a change, so the track is built from the elements a backing track has. The
-// noise comes from a fixed-seed generator: the same map always renders the same samples. The
-// audio is never committed: the tempo map in bench/tempo-map.json is the truth, and this script
-// can always recreate the audio from it.
+// The track has the elements a backing track has, because a bare click track is not music to the
+// beat model: an accented kick plus an open-hat/crash-like hit on beat 1 (the only accented beat,
+// so the downbeat is identifiable), a snare on 2 and 4, a normal kick on 3, closed hats on every
+// eighth note and a bass note per beat. A map may also ask for gaps (a sustained pad, no attacks)
+// and for short pitched notes between the beats (vocal-like onsets that must not pull the
+// millisecond refinement onto them).
+//
+// The noise comes from a fixed-seed generator: the same map always renders the same samples.
+// The audio is never committed: the tempo map in bench/tempo-map.json or bench/maps/*.json is the
+// truth, and this script can always recreate the audio from it.
+//
+// Usage: node bench/gen.mjs --map bench/maps/gaps.json --out bench/out/gaps.wav
 
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { beatTimes } from './map.mjs';
+import { beatGrid, gapSpans, isInGap } from './map.mjs';
+
+const VOCAL_LENGTH_SEC = 0.16;
+const VOCAL_ATTACK_SEC = 0.004;
+const VOCAL_DECAY_SEC = 0.055;
+const VOCAL_OFFSETS = [0.25, 0.4, 0.6, 0.75];
+const VOCAL_FREQUENCIES = [440, 493.88, 523.25, 587.33];
 
 function parseArgs(argv) {
   const options = { map: 'bench/tempo-map.json', out: null };
@@ -32,9 +44,10 @@ function parseArgs(argv) {
 
 function render(map) {
   const rate = map.sampleRate ?? 44_100;
-  const beatsPerBar = map.beatsPerBar ?? 4;
-  const { times, endSec } = beatTimes(map);
-  const samples = new Float32Array(Math.ceil((endSec + 1) * rate));
+  const grid = beatGrid(map);
+  const beats = grid.beats;
+  const gaps = gapSpans(map);
+  const samples = new Float32Array(Math.ceil((grid.endSec + 1) * rate));
   let seed = 12_345;
   const noise = () => {
     seed = (Math.imul(seed, 1_664_525) + 1_013_904_223) >>> 0;
@@ -50,13 +63,23 @@ function render(map) {
     }
   };
   // A sine whose pitch falls from 155 Hz to 45 Hz: the phase is the integral of the frequency.
-  const kick = (at) =>
+  const kick = (at, gain) =>
     add(at, 0.25, (t) => {
       const phase = 2 * Math.PI * (45 * t + (110 * (1 - Math.exp(-40 * t))) / 40);
-      return 0.7 * Math.sin(phase) * Math.exp(-t / 0.09);
+      return gain * Math.sin(phase) * Math.exp(-t / 0.09);
     });
   const snare = (at) =>
     add(at, 0.2, (t) => (0.45 * noise() + 0.3 * Math.sin(2 * Math.PI * 190 * t)) * Math.exp(-t / 0.05));
+  // An open hat: longer than the closed one below, which is what makes beat 1 stand out.
+  const crash = (at) => {
+    let previous = 0;
+    add(at, 0.4, (t) => {
+      const value = noise();
+      const highpassed = value - previous;
+      previous = value;
+      return 0.18 * highpassed * Math.exp(-t / 0.16);
+    });
+  };
   const hat = (at, gain) => {
     let previous = 0;
     add(at, 0.06, (t) => {
@@ -68,16 +91,80 @@ function render(map) {
   };
   const bass = (at, frequency, lengthSec) =>
     add(at, lengthSec, (t) => 0.3 * Math.sin(2 * Math.PI * frequency * t) * Math.exp(-t / (lengthSec * 0.8)));
-  for (let index = 0; index < times.length; index += 1) {
-    const at = times[index];
-    const period = index + 1 < times.length ? times[index + 1] - at : at - times[index - 1];
-    const inBar = index % beatsPerBar;
-    if (inBar % 2 === 0) kick(at);
-    else snare(at);
+  // A slow-attack chord that fills a gap. It is the only sound there: no drum, hat, bass or vocal
+  // attack is rendered inside a gap.
+  const pad = (startSec, endSec) => {
+    const duration = endSec - startSec;
+    if (duration <= 0) return;
+    const attack = Math.min(0.3, duration / 4);
+    const release = Math.min(0.6, duration / 4);
+    const chord = [130.81, 164.81, 196.0, 261.63]; // C major, one chord
+    add(startSec, duration, (t) => {
+      const envelope = Math.min(1, t / attack) * Math.min(1, (duration - t) / release);
+      let value = 0;
+      for (let index = 0; index < chord.length; index += 1) {
+        value += Math.sin(2 * Math.PI * chord[index] * t + index * 0.7);
+      }
+      return (0.08 * envelope * value) / chord.length;
+    });
+  };
+  const vocal = (at, frequency) =>
+    add(at, VOCAL_LENGTH_SEC, (t) => {
+      const envelope =
+        Math.min(1, t / VOCAL_ATTACK_SEC) *
+        Math.exp(-t / VOCAL_DECAY_SEC) *
+        Math.min(1, (VOCAL_LENGTH_SEC - t) / 0.02);
+      const partials =
+        Math.sin(2 * Math.PI * frequency * t) +
+        0.5 * Math.sin(4 * Math.PI * frequency * t) +
+        0.3 * Math.sin(6 * Math.PI * frequency * t) +
+        0.15 * Math.sin(8 * Math.PI * frequency * t);
+      return (0.12 * envelope * partials) / 1.95;
+    });
+  const inGap = (timeSec) => isInGap(gaps, timeSec);
+  // The last beat has no next beat to measure against. With a single-beat map, fall back to the
+  // beat's own segment period instead of subtracting the missing previous beat (which was NaN).
+  const periodAt = (index) => {
+    if (index + 1 < beats.length) return beats[index + 1].timeSec - beats[index].timeSec;
+    if (index > 0) return beats[index].timeSec - beats[index - 1].timeSec;
+    return beats[index].periodSec;
+  };
+
+  for (let index = 0; index < beats.length; index += 1) {
+    const beat = beats[index];
+    const at = beat.timeSec;
+    if (inGap(at)) continue;
+    const period = periodAt(index);
+    if (beat.beatInBar === 1) {
+      kick(at, 1.0);
+      crash(at);
+    } else if (beat.beatInBar === 2 || beat.beatInBar === 4) {
+      snare(at);
+    } else {
+      kick(at, 0.7);
+    }
     hat(at, 0.22);
     hat(at + period / 2, 0.14);
-    bass(at, inBar === 2 ? 98 : 73.4, period * 0.9);
+    // Let the bass decay stop at the gap instead of ringing into the pad.
+    let bassLength = period * 0.9;
+    for (const gap of gaps) {
+      if (gap.startSec > at && gap.startSec < at + bassLength) bassLength = gap.startSec - at;
+    }
+    if (bassLength > 0.01) bass(at, beat.beatInBar === 3 ? 98 : 73.4, bassLength);
   }
+
+  for (const gap of gaps) pad(gap.startSec, gap.endSec);
+
+  if (map.vocalOnsets === true) {
+    for (let index = 0; index < beats.length; index += 1) {
+      const beat = beats[index];
+      if (inGap(beat.timeSec)) continue;
+      const at = beat.timeSec + periodAt(index) * VOCAL_OFFSETS[index % VOCAL_OFFSETS.length];
+      if (inGap(at)) continue;
+      vocal(at, VOCAL_FREQUENCIES[index % VOCAL_FREQUENCIES.length]);
+    }
+  }
+
   return { samples, rate };
 }
 

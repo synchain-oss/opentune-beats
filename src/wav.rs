@@ -45,8 +45,20 @@ struct Format {
     bits: u16,
 }
 
+/// The `data` size a streaming writer leaves behind when it did not know the length up front.
+const STREAMED_CHUNK_SIZE: u32 = 0xFFFF_FFFF;
+
+/// The reason an RF64/BW64 file is refused: it is a real WAV family, not a broken RIFF file.
+const RF64_REASON: &str = "RF64/BW64 WAV files are not supported; write a plain RIFF/WAVE file";
+
 pub fn decode(bytes: &[u8]) -> Result<Audio, WavError> {
-    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+    if bytes.len() < 12 {
+        return Err(WavError::NotWave);
+    }
+    if (&bytes[0..4] == b"RF64" || &bytes[0..4] == b"BW64") && &bytes[8..12] == b"WAVE" {
+        return Err(WavError::Unsupported(RF64_REASON));
+    }
+    if &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return Err(WavError::NotWave);
     }
     let mut format: Option<Format> = None;
@@ -54,9 +66,18 @@ pub fn decode(bytes: &[u8]) -> Result<Audio, WavError> {
     let mut position = 12;
     while position + 8 <= bytes.len() {
         let id = &bytes[position..position + 4];
-        let size = le32(&bytes[position + 4..position + 8]) as usize;
+        let declared = le32(&bytes[position + 4..position + 8]) as usize;
         let body_start = position + 8;
-        let body_end = body_start.checked_add(size).ok_or(WavError::Truncated)?;
+        // A writer that streams a WAV cannot know the data size when it writes the header and
+        // fills the field with 0xFFFFFFFF; the samples then run to the end of the file.
+        let streamed = id == b"data" && declared == STREAMED_CHUNK_SIZE as usize;
+        let body_end = if streamed {
+            bytes.len()
+        } else {
+            body_start
+                .checked_add(declared)
+                .ok_or(WavError::Truncated)?
+        };
         if body_end > bytes.len() {
             return Err(WavError::Truncated);
         }
@@ -66,7 +87,7 @@ pub fn decode(bytes: &[u8]) -> Result<Audio, WavError> {
         } else if id == b"data" {
             data = Some(body);
         }
-        position = body_end + (size & 1);
+        position = body_end + if streamed { 0 } else { declared & 1 };
     }
     let format = format.ok_or(WavError::Truncated)?;
     let data = data.ok_or(WavError::Truncated)?;
@@ -242,6 +263,29 @@ mod tests {
         let mut bytes = wav(1, 1, 44_100, 16, &[0, 0]);
         bytes.truncate(30);
         assert!(matches!(decode(&bytes), Err(WavError::Truncated)));
+    }
+
+    #[test]
+    fn a_streamed_data_chunk_runs_to_the_end() {
+        // A writer that streams cannot know the data size and leaves 0xFFFFFFFF behind.
+        let samples: Vec<u8> = [0.25f32, -0.5]
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        let mut bytes = wav(3, 1, 44_100, 32, &samples);
+        let data_size = 36 + 4;
+        bytes[data_size..data_size + 4].copy_from_slice(&STREAMED_CHUNK_SIZE.to_le_bytes());
+        let audio = decode(&bytes).expect("decodes");
+        assert_eq!(audio.samples, vec![0.25, -0.5]);
+    }
+
+    #[test]
+    fn rf64_is_refused_with_a_clear_reason() {
+        let mut bytes = wav(1, 1, 44_100, 16, &[0, 0]);
+        bytes[0..4].copy_from_slice(b"RF64");
+        let error = decode(&bytes).err().expect("fails");
+        assert_eq!(error, WavError::Unsupported(RF64_REASON));
+        assert!(error.detail().contains("RF64"));
     }
 
     #[test]

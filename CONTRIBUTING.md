@@ -85,8 +85,16 @@ node scripts/ci-checks.mjs pull-request-target
 `models/`、`target/`、`.cache/`）不扫描。
 
 合成伴奏的毫秒级精度检查由 CI 的 `accuracy` job 跑：`bench/gen.mjs` 按 `bench/tempo-map.json`
-渲染音频（不入库），`bench/score.mjs` 比较 `analyze` 的输出，中位误差 < 5 ms、P95 < 15 ms、
-±70 ms F ≥ 0.95 才算通过。本机有模型与二进制时可以照做。
+与 `bench/maps/*.json` 逐张渲染音频（不入库），`bench/score.mjs` 比较 `analyze` 的输出。拍点门槛
+（中位误差 < 5 ms、P95 < 15 ms、±70 ms F ≥ 0.95）之外的 tempo map 门槛由每张 map 的
+`acceptance` 声明：分段数与真值相符（稳定素材恰好 1 段，变速素材 ±1 段）、每段 BPM 误差 ≤ 1%、
+稳定素材置信度 ≥ 0.8、精修后拍间隔离散度不明显大于原始。本机有模型与二进制时可以照做：
+
+```bash
+node bench/gen.mjs --map bench/maps/gaps.json --out bench/out/gaps.wav
+./target/release/opentune-beats analyze bench/out/gaps.wav --models-dir models > bench/out/gaps.json
+node bench/score.mjs --map bench/maps/gaps.json --analysis bench/out/gaps.json
+```
 
 ## 7. ★ 不会被接受的改动
 

@@ -81,6 +81,15 @@ pub fn compute(samples: &[f32], sample_rate: u32) -> OnsetEnvelope {
 }
 
 #[cfg(test)]
+impl OnsetEnvelope {
+    /// An envelope built from explicit values, so a test can place attacks without rendering
+    /// audio. The values have the same meaning as the ones `compute` produces.
+    pub fn from_strength(hop_sec: f64, strength: Vec<f32>) -> Self {
+        OnsetEnvelope { hop_sec, strength }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

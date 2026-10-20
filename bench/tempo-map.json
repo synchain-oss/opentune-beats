@@ -6,5 +6,6 @@
   "segments": [
     { "bpm": 100, "bars": 12 },
     { "bpm": 120, "bars": 12 }
-  ]
+  ],
+  "acceptance": { "beats": true, "tempoMap": true }
 }
