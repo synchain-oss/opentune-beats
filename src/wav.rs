@@ -49,8 +49,7 @@ struct Format {
 const STREAMED_CHUNK_SIZE: u32 = 0xFFFF_FFFF;
 
 /// The reason an RF64/BW64 file is refused: it is a real WAV family, not a broken RIFF file.
-const RF64_REASON: &str =
-    "RF64/BW64 WAV files are not supported; write a plain RIFF/WAVE file (the limit is 4 GiB)";
+const RF64_REASON: &str = "RF64/BW64 WAV files are not supported; write a plain RIFF/WAVE file";
 
 pub fn decode(bytes: &[u8]) -> Result<Audio, WavError> {
     if bytes.len() < 12 {

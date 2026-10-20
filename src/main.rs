@@ -304,7 +304,15 @@ fn json_escape(text: &str) -> String {
     out
 }
 
+#[cfg(test)]
 fn run<I: IntoIterator<Item = OsString>>(args: I) -> (u8, String, String) {
+    let (code, stdout, stderr, _) = run_command(args);
+    (code, stdout, stderr)
+}
+
+/// Runs the command. The last element is true when it was an `analyze` command (a failed parse
+/// is not one), which decides the exit code when stdout cannot be written.
+fn run_command<I: IntoIterator<Item = OsString>>(args: I) -> (u8, String, String, bool) {
     let args: Vec<OsString> = args.into_iter().collect();
     let command = match parse(&args) {
         Ok(command) => command,
@@ -316,14 +324,24 @@ fn run<I: IntoIterator<Item = OsString>>(args: I) -> (u8, String, String) {
                 message = error.message,
                 usage = USAGE,
             );
-            return (EXIT_USAGE, json, log);
+            return (EXIT_USAGE, json, log, false);
         }
     };
     match command {
-        Command::Help => (EXIT_OK, String::new(), format!("{usage}\n", usage = USAGE)),
-        Command::VersionLine | Command::VersionText => (EXIT_OK, version_line(), String::new()),
-        Command::VersionJson => (EXIT_OK, version_json(), String::new()),
-        Command::Analyze(options) => run_analyze(&options),
+        Command::Help => (
+            EXIT_OK,
+            String::new(),
+            format!("{usage}\n", usage = USAGE),
+            false,
+        ),
+        Command::VersionLine | Command::VersionText => {
+            (EXIT_OK, version_line(), String::new(), false)
+        }
+        Command::VersionJson => (EXIT_OK, version_json(), String::new(), false),
+        Command::Analyze(options) => {
+            let (code, stdout, stderr) = run_analyze(&options);
+            (code, stdout, stderr, true)
+        }
     }
 }
 
@@ -350,21 +368,25 @@ fn run_analyze(options: &AnalyzeOptions) -> (u8, String, String) {
     }
 }
 
-/// The exit code when stdout could not be written. It is always 5: the result the caller asked
-/// for was lost, whatever the command was and whatever code the run had reached
-/// (`docs/output.md`, section 3).
-fn exit_after_write_failure() -> u8 {
-    EXIT_ANALYSIS_FAILURE
+/// The exit code when stdout could not be written. Only an analysis that would have succeeded
+/// becomes 5: its result was lost and the caller must know. A run that already failed keeps its
+/// code, and `version`, `--version` and `--help` keep their 0 (`docs/output.md`, section 3).
+fn exit_after_write_failure(code: u8, analysis: bool) -> u8 {
+    if analysis && code == EXIT_OK {
+        EXIT_ANALYSIS_FAILURE
+    } else {
+        code
+    }
 }
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    let (mut code, stdout, mut stderr) = run(args);
+    let (mut code, stdout, mut stderr, analysis) = run_command(args);
     if !stdout.is_empty() {
         let mut out = io::stdout().lock();
         let wrote = out.write_all(stdout.as_bytes()).is_ok() && out.flush().is_ok();
         if !wrote {
-            code = exit_after_write_failure();
+            code = exit_after_write_failure(code, analysis);
             stderr.push_str(&format!(
                 "{name}: the result could not be written to stdout\n",
                 name = NAME
@@ -576,9 +598,32 @@ mod tests {
     }
 
     #[test]
-    fn a_lost_stdout_is_exit_five() {
-        assert_eq!(exit_after_write_failure(), EXIT_ANALYSIS_FAILURE);
+    fn a_lost_stdout_is_exit_five_only_for_a_successful_analysis() {
         assert_eq!(EXIT_ANALYSIS_FAILURE, 5);
+        // An analysis that would have exited 0 loses its result: exit 5.
+        assert_eq!(exit_after_write_failure(EXIT_OK, true), 5);
+        // A run that already failed keeps its code.
+        assert_eq!(exit_after_write_failure(EXIT_USAGE, true), EXIT_USAGE);
+        assert_eq!(exit_after_write_failure(3, true), 3);
+        assert_eq!(exit_after_write_failure(4, true), 4);
+        // version, --version and --help stay 0; a usage error stays 2.
+        assert_eq!(exit_after_write_failure(EXIT_OK, false), EXIT_OK);
+        assert_eq!(exit_after_write_failure(EXIT_USAGE, false), EXIT_USAGE);
+    }
+
+    #[test]
+    fn only_analyze_commands_are_marked_as_analysis() {
+        for (line, analysis) in [
+            ("--version", false),
+            ("version --json", false),
+            ("--help", false),
+            ("analyze", false),
+            ("analyze take1.wav", true),
+        ] {
+            let args: Vec<OsString> = line.split_whitespace().map(OsString::from).collect();
+            let (_, _, _, marked) = run_command(args);
+            assert_eq!(marked, analysis, "{line}");
+        }
     }
 
     #[test]

@@ -156,10 +156,13 @@ pub struct TempoChange {
 pub struct Refinement {
     /// True when at least one segment adopted the refined times.
     pub applied: bool,
-    /// The median shift the attacks suggest for the whole grid. Diagnostic: what a beat actually
-    /// gets is decided per beat against its span's tempo line (see `refine_beats`).
+    /// The beat-count-weighted median of the common offsets of the segments whose refinement was
+    /// adopted, in ms; 0 when no segment was adopted. With one segment it is that segment's
+    /// offset. With several segments of which only some were adopted, segments that kept the
+    /// model's times do not count, so it is not a shift every beat received.
     pub global_offset_ms: f64,
-    /// The median and p95 of the per-beat displacements that were actually applied, in ms.
+    /// The median and p95 of the per-beat displacements that were applied beyond their own
+    /// segment's common offset (not beyond `global_offset_ms`), in ms.
     pub median_adjust_ms: f64,
     pub p95_adjust_ms: f64,
     pub segments_applied: usize,
@@ -585,15 +588,12 @@ fn refine_beats(
             // period away it is their mean, otherwise (an edge, or a gap) the span's own line.
             // The line moves with the common offset, so the comparison below is about how far
             // this beat deviates from its neighbours, not about the common move itself.
-            let local = if index > first
-                && index + 1 < beats.len()
-                && steps[index - 1] == 1
-                && steps[index] == 1
-            {
-                (beats[index - 1].raw + beats[index + 1].raw) / 2.0
-            } else {
-                fit.offset + fit.indices[position] * fit.period
-            };
+            let local =
+                if index > first && index < last && steps[index - 1] == 1 && steps[index] == 1 {
+                    (beats[index - 1].raw + beats[index + 1].raw) / 2.0
+                } else {
+                    fit.offset + fit.indices[position] * fit.period
+                };
             let line = local + offset;
             if (target - line).abs() < (base - line).abs() - 1e-12 {
                 candidate.push(target);
@@ -1940,6 +1940,57 @@ mod tests {
                 assert!(spread_ms(&after) <= spread_ms(&before) + REFINE_SPREAD_SLACK_MS);
             }
         }
+    }
+
+    #[test]
+    fn the_last_beat_of_a_segment_ignores_the_next_segment() {
+        // Two spans, 0.6 s then 0.5 s, with the boundary right after the 0.6 s grid. The last beat
+        // of the first span sits on its grid and its attack is 25 ms early. Averaged with the next
+        // span's first beat (0.5 s away, not 0.6 s) the local line would lie 50 ms early and pull
+        // the beat onto the attack; against its own span's line it is already where it belongs
+        // and must stay.
+        let mut strength = vec![0.0f32; 10_000];
+        let mut beats = Vec::new();
+        let mut push = |raw: f64, attack: f64| {
+            strength[(attack * 1000.0).round() as usize] = 5.0;
+            beats.push(Beat {
+                raw,
+                time: raw,
+                confidence: 0.9,
+                refined: false,
+                is_downbeat: false,
+                bar: None,
+                beat_in_bar: None,
+                segment: 0,
+            });
+        };
+        for index in 0..7 {
+            let truth = 0.5 + index as f64 * 0.6;
+            let jitter = if index == 1 || index == 3 { 0.015 } else { 0.0 };
+            let attack = if index == 6 { truth - 0.025 } else { truth };
+            push(truth + jitter, attack);
+        }
+        for index in 0..8 {
+            let time = 4.6 + index as f64 * 0.5;
+            push(time, time);
+        }
+        let envelope = crate::onset::OnsetEnvelope::from_strength(0.001, strength);
+        let times: Vec<f64> = beats.iter().map(|beat| beat.raw).collect();
+        let steps = beat_steps(&times);
+        let mut on = settings(9.5);
+        on.refine = true;
+        let mut warnings = Vec::new();
+        let spans = [(0, 6), (7, 14)];
+        let (refined, refinement) =
+            refine_beats(beats, &spans, &steps, Some(&envelope), &on, &mut warnings);
+        assert!(refinement.applied);
+        assert!(refined[..=6].iter().all(|beat| beat.refined));
+        let last = &refined[6];
+        assert!(
+            (last.time - last.raw).abs() < 0.002,
+            "moved by {} ms",
+            (last.time - last.raw) * 1000.0
+        );
     }
 
     #[test]

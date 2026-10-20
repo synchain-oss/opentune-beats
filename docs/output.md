@@ -103,9 +103,11 @@ the self-check a caller runs after installing the binary.
 - `segments[].octaveNote` is `"halved"`, `"doubled"` or `null`: set when a segment's reading was
   reconciled with the neighbouring ones because the tempo was a factor of two off.
 - `segments[].refinement` is `"applied"` when the millisecond refinement was adopted for that
-  segment and `"skipped"` when the model's raw times were kept (the refinement would not have made
-  the segment clearly better). `refinement.applied` at the top level is true when at least one
-  segment is `"applied"`.
+  segment and `"skipped"` when the model's raw times were kept: the refinement would not have made
+  the segment clearly better, or it did not run at all (`--no-refine`, no usable audio). The value
+  is decided on the final segments, after the segments have been detected again on the refined
+  beats: a segment is `"applied"` when at least one beat inside it carries a refined time.
+  `refinement.applied` at the top level is true when at least one segment is `"applied"`.
 - `segments[].gapAfterSec` is the time between this segment's last beat and the next segment's
   first beat when the model reported no beat in between (a breakdown), and `null` when the two are
   contiguous. The missing beats are not inserted into `beats`: a caller that needs them derives
@@ -117,10 +119,13 @@ the self-check a caller runs after installing the binary.
   the intervals drift across the boundary (or the change is too small to be called a step).
 - `refinement.applied` is `false` when `--no-refine` was given, when the refinement could not run
   (a `REFINE_SKIPPED` warning then explains why), or when no segment cleared its acceptance check.
-  `globalOffsetMs` is the median of the common per-segment offsets the refinement applied (0 when
-  none); `medianAdjustMs` and `p95AdjustMs` describe the per-beat adjustments that were applied
-  *beyond* that common offset. `segmentsApplied` and `segmentsSkipped` count the segments of
-  `segments` by their `refinement` value. `ioiSpreadBeforeMs` and `ioiSpreadAfterMs` are the
+  `globalOffsetMs` is the beat-count-weighted median of the common offsets of the segments whose
+  refinement was adopted (0 when none). With one segment it is that segment's offset. With several
+  segments of which only some were adopted, the segments that kept the model's times do not count,
+  so it is a summary of the adopted segments and not a shift that every beat received.
+  `medianAdjustMs` and `p95AdjustMs` describe the per-beat adjustments that were applied *beyond
+  the common offset of the beat's own segment* (not beyond `globalOffsetMs`). `segmentsApplied`
+  and `segmentsSkipped` count the final segments of `segments` by their `refinement` value. `ioiSpreadBeforeMs` and `ioiSpreadAfterMs` are the
   p95-p5 spread of the one-beat intervals before and after the refinement; the refinement is
   designed so the second never exceeds the first by more than its own ~1 ms resolution (2 ms).
 - `summary` is the aggregate a caller can show without walking the arrays.
@@ -151,9 +156,11 @@ the self-check a caller runs after installing the binary.
 | 4 | The input cannot be read or decoded (`INPUT_UNREADABLE`), or is too short to analyse (`INPUT_TOO_SHORT`) |
 | 5 | Analysis failed for any other reason (`ANALYSIS_FAILED`) |
 
-If stdout cannot be written (for example the reader closed the pipe), the run exits 5, whatever
-command it was and whatever code it had reached: the JSON the caller asked for was lost, and a
-caller that reads stdout must treat the run as failed.
+If stdout cannot be written (for example the reader closed the pipe) after an `analyze` run that
+would have exited 0, the run exits 5 instead. This is a behaviour change for analysis runs: the
+analysis result was lost, and a caller that reads stdout must be able to tell. A run that already
+exits non-zero keeps its code (2, 3, 4, 5), so the error class is not hidden. `version`,
+`--version` and `--help` still exit 0 when stdout cannot be written, as before.
 
 On any non-zero exit, stdout still carries one JSON object:
 
