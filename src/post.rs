@@ -785,18 +785,29 @@ fn detect_cuts(periods: &[f64], min_beats: usize) -> Vec<usize> {
                 &periods[boundary..boundary + window],
             );
             for candidate in low..=high {
-                let score = split_error(
-                    &periods[candidate - window..candidate],
-                    &periods[candidate..candidate + window],
-                );
+                let before = &periods[candidate - window..candidate];
+                let after = &periods[candidate..candidate + window];
+                // A split whose two sides keep the same tempo is not a tempo change, however
+                // small its variance (two steady windows before the change score 0 as well).
+                if relative_change(stats::median(after), stats::median(before))
+                    <= SEGMENT_JUMP_RATIO
+                {
+                    continue;
+                }
+                let score = split_error(before, after);
                 let closer = candidate.abs_diff(boundary) < best.abs_diff(boundary);
                 if score < best_score - 1e-12 || (score < best_score + 1e-12 && closer) {
                     best = candidate;
                     best_score = score;
                 }
             }
-            cuts.push(best);
-            boundary = best + min_beats.max(1);
+            // The scan must move forward even when a short minimum segment puts the next window
+            // back across the same change (min_beats 1 or 2), or it would find the same cut again
+            // forever.
+            if cuts.last().is_none_or(|&last| best > last) {
+                cuts.push(best);
+            }
+            boundary = (best + min_beats.max(1)).max(boundary + 1);
         } else {
             boundary += 1;
         }
@@ -1872,6 +1883,18 @@ mod tests {
         );
         for (beat, time) in analysis.beats.iter().zip(before) {
             assert!((beat.time - time - 0.025).abs() < 0.002);
+        }
+    }
+
+    #[test]
+    fn a_short_minimum_segment_still_ends_the_cut_scan() {
+        // 100 bpm then 120 bpm: with a minimum of 1 or 2 beats the window after a cut still sees
+        // the old tempo, which used to report the same cut again without end.
+        let mut periods = vec![0.6; 16];
+        periods.extend(vec![0.5; 16]);
+        for min_beats in 1..=3 {
+            let cuts = detect_cuts(&periods, min_beats);
+            assert_eq!(cuts, vec![16], "min_beats {min_beats}");
         }
     }
 
