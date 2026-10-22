@@ -49,8 +49,9 @@ test('the entry guard recognizes the script itself', (t) => {
   assert.equal(isMainModule(other), false);
   // A path that does not exist is not the script either, and must not throw.
   assert.equal(isMainModule(path.join(root, 'missing.mjs')), false);
-  // No entry path at all is not the script.
-  assert.equal(isMainModule(undefined), false);
+  // No entry path at all is not the script. An empty string stands for it: passing `undefined`
+  // would take the default parameter and read `process.argv[1]` instead.
+  assert.equal(isMainModule(''), false);
 });
 
 test('the entry guard recognizes the script through a symbolic link', (t) => {
