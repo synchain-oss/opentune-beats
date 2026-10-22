@@ -23,9 +23,15 @@ use crate::stats;
 // ---------------------------------------------------------------------------------------------
 // Tuning constants. Each one is here, with its reason, rather than at its use site.
 
-/// The confidence at or below which a segment is reported as a low-confidence segment, both in
+/// The confidence below which a segment is reported as a low-confidence segment, both in
 /// `warnings` and in `summary.lowConfidenceSegments`. One definition, so the two never drift.
 pub const LOW_CONFIDENCE_THRESHOLD: f64 = 0.5;
+
+/// True when a segment of this confidence is a low-confidence segment. A confidence exactly at the
+/// threshold is not low (`docs/output.md`: "below the threshold").
+pub fn is_low_confidence(confidence: f64) -> bool {
+    confidence < LOW_CONFIDENCE_THRESHOLD
+}
 
 /// The local tempo window, in beats, used to decide where one constant-tempo span ends.
 const SEGMENT_WINDOW: usize = 4;
@@ -334,7 +340,7 @@ pub fn build(
         ));
     }
     for segment in &segments {
-        if segment.confidence < LOW_CONFIDENCE_THRESHOLD {
+        if is_low_confidence(segment.confidence) {
             warnings.push(warning(
                 "LOW_CONFIDENCE_SEGMENT",
                 "the tempo fit is uncertain for this segment",
@@ -1405,6 +1411,14 @@ mod tests {
     fn spread_ms(times: &[f64]) -> f64 {
         let steps = beat_steps(times);
         ioi_spread_ms(times, &steps)
+    }
+
+    #[test]
+    fn the_low_confidence_boundary_is_strict() {
+        assert!(is_low_confidence(LOW_CONFIDENCE_THRESHOLD - 1e-9));
+        assert!(!is_low_confidence(LOW_CONFIDENCE_THRESHOLD));
+        assert!(!is_low_confidence(LOW_CONFIDENCE_THRESHOLD + 1e-9));
+        assert!(is_low_confidence(0.0));
     }
 
     #[test]
