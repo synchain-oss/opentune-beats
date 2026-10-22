@@ -10,7 +10,7 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 
 const PIN = '1ae768e78f1ad83b0ed3886241dc29ffde853c40';
 const RAW = `https://raw.githubusercontent.com/danigb/beat-this-rs/${PIN}/models`;
@@ -126,7 +126,26 @@ async function main() {
   }
 }
 
-// Run only when started as a script, so a test can import the helpers above.
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+/**
+ * True when this file is the one the process was started with. Both sides are resolved through
+ * symbolic links: `import.meta.url` holds the real path of the module, while `process.argv[1]`
+ * holds the path as it was typed. A path that cannot be resolved is not the main module.
+ * @param {string} [entry] the path the process was started with
+ * @returns {boolean}
+ */
+export function isMainModule(entry = process.argv[1]) {
+  if (!entry) return false;
+  try {
+    return fs.realpathSync(entry) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+}
+
+// Run only when started as a script, so a test can import the helpers above. The entry path is
+// resolved through symbolic links before it is compared: Node holds the real path of the main
+// module in `import.meta.url`, but `process.argv[1]` keeps the path as it was typed, so a script
+// started through a link would otherwise never run and would exit 0 without fetching anything.
+if (process.argv[1] && isMainModule()) {
   await main();
 }

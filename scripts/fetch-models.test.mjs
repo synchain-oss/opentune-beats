@@ -15,7 +15,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { wantedKeys, writeFresh } from './fetch-models.mjs';
+import { isMainModule, wantedKeys, writeFresh } from './fetch-models.mjs';
 
 const SCRIPT = fileURLToPath(new URL('./fetch-models.mjs', import.meta.url));
 
@@ -37,6 +37,30 @@ test('wantedKeys rejects a name that is not an own model', () => {
   for (const name of ['large', '', 'constructor', '__proto__', 'toString', 'hasOwnProperty']) {
     assert.throws(() => wantedKeys(name), /unknown model/, `model ${JSON.stringify(name)}`);
   }
+});
+
+test('the entry guard recognizes the script itself, however it was started', (t) => {
+  // The plain path is the script itself.
+  assert.equal(isMainModule(SCRIPT), true);
+  // A symbolic link to the script is still the script: Node resolves the main module to its real
+  // path, so the guard has to resolve the entry path the same way. Without that, the script would
+  // exit 0 without fetching anything.
+  const root = scratch(t);
+  const link = path.join(root, 'fetch-models.mjs');
+  try {
+    fs.symlinkSync(SCRIPT, link);
+  } catch (error) {
+    if (error.code === 'EPERM' || error.code === 'EACCES') {
+      t.skip('this account cannot create symbolic links');
+      return;
+    }
+    throw error;
+  }
+  assert.equal(isMainModule(link), true);
+  // Another file is not the script.
+  assert.equal(isMainModule(path.join(root, 'other.mjs')), false);
+  // A path that does not exist is not the script either, and must not throw.
+  assert.equal(isMainModule(path.join(root, 'missing.mjs')), false);
 });
 
 test('the script exits 1 on an inherited property name, before it creates or downloads anything', (t) => {

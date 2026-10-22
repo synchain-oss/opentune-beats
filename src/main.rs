@@ -632,10 +632,13 @@ mod tests {
     #[test]
     fn a_non_unicode_input_path_is_an_input_error_without_a_panic() {
         let args = vec![OsString::from("analyze"), non_unicode_argument()];
-        let (code, stdout, _, analysis) = run_command(args);
+        let (code, stdout, stderr, analysis) = run_command(args);
         assert_eq!(code, 4);
         assert!(analysis);
         assert!(stdout.contains("\"code\":\"INPUT_UNREADABLE\""));
+        // The path is shown lossily, and only in the stderr message: the stdout `detail` never
+        // repeats a path the user typed (`docs/output.md`, section 3).
+        assert!(stderr.contains("t\u{FFFD}.wav"), "stderr: {stderr}");
         assert!(!stdout.contains('\u{FFFD}'));
     }
 
