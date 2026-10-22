@@ -75,10 +75,11 @@ jobs:
         if: ${{ !cancelled() }}
         run: node scripts/ci-checks.mjs pins
       # The identity rules and the workflow scan have fixed test cases; the tests need no event
-      # context, so they run here rather than on a pull request only.
-      - name: ci-checks unit tests
+      # context, so they run here rather than on a pull request only. The model fetcher and the
+      # synthetic generator have regression tests too; none of them touches the network.
+      - name: Script unit tests
         if: ${{ !cancelled() }}
-        run: node --test scripts/ci-checks.test.mjs
+        run: node --test scripts/ci-checks.test.mjs scripts/fetch-models.test.mjs bench/gen.test.mjs
       - name: Commit range and identity rules
         id: scope
         if: ${{ !cancelled() }}

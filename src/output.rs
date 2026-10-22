@@ -34,7 +34,7 @@ pub fn document(context: &Document<'_>) -> Json {
     let low: Vec<Json> = analysis
         .segments
         .iter()
-        .filter(|segment| segment.confidence < post::LOW_CONFIDENCE_THRESHOLD)
+        .filter(|segment| post::is_low_confidence(segment.confidence))
         .map(|segment| Json::count(segment.index))
         .collect();
     let mut downbeats = 0;

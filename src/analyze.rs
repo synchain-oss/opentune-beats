@@ -294,6 +294,28 @@ mod tests {
     }
 
     #[test]
+    fn file_name_drops_the_directory_and_converts_lossily_only_for_display() {
+        // A path without a final component has no name; the directory must not leak instead.
+        assert_eq!(file_name(Path::new("/")), "");
+        assert_eq!(file_name(Path::new("/music/..")), "");
+        #[cfg(unix)]
+        {
+            use std::ffi::OsStr;
+            use std::os::unix::ffi::OsStrExt;
+            let path = Path::new(OsStr::from_bytes(b"/m\xFFusic/t\xFFake.wav"));
+            assert_eq!(file_name(path), "t\u{FFFD}ake.wav");
+        }
+        #[cfg(windows)]
+        {
+            use std::ffi::OsString;
+            use std::os::windows::ffi::OsStringExt;
+            let name = OsString::from_wide(&[0x74, 0xD800, 0x2E, 0x77, 0x61, 0x76]);
+            let path = Path::new(r"C:\Music").join(name);
+            assert_eq!(file_name(&path), "t\u{FFFD}.wav");
+        }
+    }
+
+    #[test]
     fn a_missing_input_is_an_input_error() {
         let request = Request {
             input: Path::new("definitely-not-here.wav"),

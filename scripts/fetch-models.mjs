@@ -10,6 +10,7 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const PIN = '1ae768e78f1ad83b0ed3886241dc29ffde853c40';
 const RAW = `https://raw.githubusercontent.com/danigb/beat-this-rs/${PIN}/models`;
@@ -65,7 +66,7 @@ async function download(url) {
  * @param {string} file
  * @param {Buffer} bytes
  */
-function writeFresh(file, bytes) {
+export function writeFresh(file, bytes) {
   let stat = null;
   try {
     stat = fs.lstatSync(file);
@@ -99,17 +100,52 @@ async function ensure(directory, model) {
   console.error(`saved     ${model.file} (${bytes.length} bytes)`);
 }
 
-try {
-  const options = parseArgs(process.argv.slice(2));
-  if (options.model !== 'all' && !Object.hasOwn(MODELS, options.model)) {
-    throw new Error(`unknown model ${options.model}`);
+/**
+ * The model keys a run fetches: `mel` always, plus the beat model(s) asked for. A name that only
+ * exists on the prototype chain (`constructor`, `__proto__`) is not a model.
+ * @param {string} model `final`, `small`, `mel` or `all`
+ * @returns {string[]}
+ */
+export function wantedKeys(model) {
+  if (model === 'all') return ['mel', 'final', 'small'];
+  if (!Object.hasOwn(MODELS, model)) throw new Error(`unknown model ${model}`);
+  return model === 'mel' ? ['mel'] : ['mel', model];
+}
+
+async function main() {
+  try {
+    const options = parseArgs(process.argv.slice(2));
+    const wanted = wantedKeys(options.model);
+    fs.mkdirSync(options.dir, { recursive: true });
+    for (const key of wanted) {
+      await ensure(options.dir, MODELS[key]);
+    }
+  } catch (error) {
+    console.error(`fetch-models: ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
   }
-  const wanted = options.model === 'all' ? ['mel', 'final', 'small'] : ['mel', options.model];
-  fs.mkdirSync(options.dir, { recursive: true });
-  for (const key of wanted) {
-    await ensure(options.dir, MODELS[key]);
+}
+
+/**
+ * True when this file is the one the process was started with. Both sides are resolved through
+ * symbolic links: `import.meta.url` holds the real path of the module, while `process.argv[1]`
+ * holds the path as it was typed. A path that cannot be resolved is not the main module.
+ * @param {string} [entry] the path the process was started with
+ * @returns {boolean}
+ */
+export function isMainModule(entry = process.argv[1]) {
+  if (!entry) return false;
+  try {
+    return fs.realpathSync(entry) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
   }
-} catch (error) {
-  console.error(`fetch-models: ${error instanceof Error ? error.message : String(error)}`);
-  process.exitCode = 1;
+}
+
+// Run only when started as a script, so a test can import the helpers above. The entry path is
+// resolved through symbolic links before it is compared: Node holds the real path of the main
+// module in `import.meta.url`, but `process.argv[1]` keeps the path as it was typed, so a script
+// started through a link would otherwise never run and would exit 0 without fetching anything.
+if (isMainModule()) {
+  await main();
 }

@@ -586,6 +586,62 @@ mod tests {
         assert_input_hidden(&["version", r"C:\Music\x"]);
     }
 
+    /// An argument that is not valid Unicode: a lone UTF-16 surrogate on Windows, an invalid
+    /// UTF-8 byte on Unix. A lossy conversion would turn it into U+FFFD and name another file.
+    fn non_unicode_argument() -> OsString {
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            OsString::from_wide(&[0x74, 0xD800, 0x2E, 0x77, 0x61, 0x76])
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            OsString::from_vec(vec![b't', 0xFF, b'.', b'w', b'a', b'v'])
+        }
+    }
+
+    #[test]
+    fn the_input_path_keeps_its_exact_bytes() {
+        let raw = non_unicode_argument();
+        assert!(
+            raw.to_str().is_none(),
+            "the fixture must not be valid Unicode"
+        );
+        let args = vec![OsString::from("analyze"), raw.clone()];
+        match parse(&args).expect("parses") {
+            Command::Analyze(options) => assert_eq!(options.input.as_os_str(), raw.as_os_str()),
+            other => panic!("expected analyze, got {other:?}"),
+        }
+        // `--models-dir` is a path as well and is kept the same way.
+        let args = vec![
+            OsString::from("analyze"),
+            OsString::from("take1.wav"),
+            OsString::from("--models-dir"),
+            raw.clone(),
+        ];
+        match parse(&args).expect("parses") {
+            Command::Analyze(options) => {
+                let dir = options.models_dir.expect("models dir");
+                assert_eq!(dir.as_os_str(), raw.as_os_str());
+            }
+            other => panic!("expected analyze, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_non_unicode_input_path_is_an_input_error_without_a_panic() {
+        let args = vec![OsString::from("analyze"), non_unicode_argument()];
+        let (code, stdout, stderr, analysis) = run_command(args);
+        assert_eq!(code, 4);
+        assert!(analysis);
+        assert!(stdout.contains("\"code\":\"INPUT_UNREADABLE\""));
+        // The path is shown lossily, and only in the stderr message: the stdout `detail` never
+        // repeats a path the user typed (`docs/output.md`, section 3).
+        assert!(stderr.contains("t\u{FFFD}.wav"), "stderr: {stderr}");
+        assert!(!stdout.contains('\u{FFFD}'));
+    }
+
     #[test]
     fn echoable_option_names_are_plain_ascii_names() {
         assert!(is_echoable_option("--bogus"));
