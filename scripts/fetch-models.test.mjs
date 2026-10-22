@@ -39,12 +39,23 @@ test('wantedKeys rejects a name that is not an own model', () => {
   }
 });
 
-test('the entry guard recognizes the script itself, however it was started', (t) => {
+test('the entry guard recognizes the script itself', (t) => {
   // The plain path is the script itself.
   assert.equal(isMainModule(SCRIPT), true);
-  // A symbolic link to the script is still the script: Node resolves the main module to its real
-  // path, so the guard has to resolve the entry path the same way. Without that, the script would
-  // exit 0 without fetching anything.
+  const root = scratch(t);
+  // A file that exists but is not the script: the paths resolve, so the comparison decides.
+  const other = path.join(root, 'other.mjs');
+  fs.writeFileSync(other, '');
+  assert.equal(isMainModule(other), false);
+  // A path that does not exist is not the script either, and must not throw.
+  assert.equal(isMainModule(path.join(root, 'missing.mjs')), false);
+  // No entry path at all is not the script.
+  assert.equal(isMainModule(undefined), false);
+});
+
+test('the entry guard recognizes the script through a symbolic link', (t) => {
+  // Node resolves the main module to its real path, so the guard has to resolve the entry path the
+  // same way. Without that, a script started through a link would exit 0 without fetching anything.
   const root = scratch(t);
   const link = path.join(root, 'fetch-models.mjs');
   try {
@@ -57,10 +68,6 @@ test('the entry guard recognizes the script itself, however it was started', (t)
     throw error;
   }
   assert.equal(isMainModule(link), true);
-  // Another file is not the script.
-  assert.equal(isMainModule(path.join(root, 'other.mjs')), false);
-  // A path that does not exist is not the script either, and must not throw.
-  assert.equal(isMainModule(path.join(root, 'missing.mjs')), false);
 });
 
 test('the script exits 1 on an inherited property name, before it creates or downloads anything', (t) => {

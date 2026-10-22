@@ -146,6 +146,6 @@ export function isMainModule(entry = process.argv[1]) {
 // resolved through symbolic links before it is compared: Node holds the real path of the main
 // module in `import.meta.url`, but `process.argv[1]` keeps the path as it was typed, so a script
 // started through a link would otherwise never run and would exit 0 without fetching anything.
-if (process.argv[1] && isMainModule()) {
+if (isMainModule()) {
   await main();
 }
