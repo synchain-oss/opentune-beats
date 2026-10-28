@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "sampleRate": 44100,
+  "beatsPerBar": 4,
+  "leadInSec": 0.5,
+  "segments": [
+    { "bpm": 100, "bars": 12 },
+    { "bpm": 120, "bars": 12 }
+  ],
+  "acceptance": { "beats": true, "tempoMap": true }
+}

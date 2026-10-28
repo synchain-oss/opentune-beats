@@ -1,6 +1,8 @@
 /target/
 /models/*.onnx
+/models/*.part
 /bench/out/
+/.cache/
 *.wav
 *.flac
 *.mp3

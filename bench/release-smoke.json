@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "name": "release smoke: steady 120 BPM, about ten seconds",
+  "sampleRate": 44100,
+  "beatsPerBar": 4,
+  "leadInSec": 0.5,
+  "segments": [{ "bpm": 120, "bars": 5 }]
+}

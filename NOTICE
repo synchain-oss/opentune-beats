@@ -17,5 +17,6 @@ beat-this-rs (Rust port of Beat This!, including the ONNX model files)
   Copyright (c) 2025 danigb
   MIT License.
 
-The licenses of the Rust crates compiled into the binary are listed in
-THIRD-PARTY-NOTICES, generated from Cargo.lock for every release.
+The licenses and copyright lines of the Rust crates compiled into the release binaries are
+reproduced in THIRD-PARTY-NOTICES, generated from the dependency graph of the release targets
+by scripts/gen-notices.mjs.

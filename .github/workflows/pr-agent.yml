@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Synchain
+# SPDX-License-Identifier: MIT
+name: PR Agent Code Review
+
+# pr-agent (describe / review / improve), DeepSeek V4.1 Flash through OpenCode Go, billed per call.
+#
+# Only on a pull request into dev: sub-pull-requests into feature/** are reviewed by
+# claude-review.yml and pr-agent-claude.yml, and this run is the primary reviewer where it runs.
+# It runs again on every push; draft, fork and bot pull requests are skipped by the central
+# workflow. The model (one model, no fallback), the limits, the timeouts and the pinned pr-agent
+# image all live in Synchain-oss/ci-workflows/pr-agent.yml; this file holds only the ignore list.
+#
+# No workflow in this repository uses pull_request_target.
+on:
+  pull_request:
+    branches: [dev]
+    types: [opened, reopened, ready_for_review, synchronize]
+
+permissions: {}
+
+jobs:
+  pr-agent:
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    uses: Synchain-oss/ci-workflows/.github/workflows/pr-agent.yml@8028e34628bc2276ca978d87ccfc364432742820 # v1.3.1
+    with:
+      provider: opencode-go
+      # pr-agent-claude.yml also comments on a pull request into dev. In persistent mode each run
+      # edits the newest comment carrying pr-agent's marker, whichever run wrote it, so one run
+      # would overwrite the other's review; every run posts a new comment instead.
+      persistent_comments: false
+      # Keep this list identical to pr-agent-claude.yml: the two runs must look at the same files.
+      ignore_globs: '["Cargo.lock", "**/*.lock", "bench/**", "LICENSES/**", "THIRD-PARTY-NOTICES*"]'
+    secrets:
+      api_key: ${{ secrets.OPENCODE_GO_API_KEY_FOR_REVIEW }}

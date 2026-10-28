@@ -1,0 +1,415 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Synchain
+# SPDX-License-Identifier: MIT
+name: CI
+
+# Build, test and compliance checks for the CLI.
+#
+# Triggers: a pull request into dev / prod / feature/**, a push to dev or feature/**, a manual
+# run on any branch, and a call from release.yml (`workflow_call`) before it packs a release.
+# Every job runs on every trigger, including a pull-request edit (`edited`): a run caused by a
+# changed body must not leave a green `beats-gate` on a commit whose build failed, because the
+# newest check of that name is the one a required check reads. The suite is small (one crate, two
+# targets), and a check that only runs on some branches is a check that surprises you on the merge.
+#
+# The single required check is `beats-gate`: it fails when any job below fails, was cancelled or
+# was skipped. A required check must not be filtered by paths, and must not be skipped, so
+# `beats-gate` runs with `if: always()` and only inspects the results of its `needs`.
+#
+# This workflow reads no secret, so a pull request from a fork (once a maintainer approves the
+# run) executes exactly the same checks.
+on:
+  pull_request:
+    branches: [dev, prod, "feature/**"]
+    # `edited` covers a changed base (a sub-pull-request retargeted at dev) and an edited title or
+    # body: both change what the attribution check sees on the same commit.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+  push:
+    branches: [dev, "feature/**"]
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      # Set by release.yml only. It tells this workflow that it runs for a release, not for a push:
+      # the concurrency group differs from the push run of the same commit, and the commit scope
+      # is the release one (`github.event_name` inside a called workflow is the caller's event).
+      release_call:
+        description: "Called from release.yml"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# One group per pull request. A push is grouped by commit: grouping by branch would let a newer
+# queued run replace an older one, and the commit in between would then never have been checked.
+# A release run (release.yml calls this workflow) has its own group: the rehearsal or the tag
+# build of a commit must neither cancel the push run of that commit nor be cancelled by it.
+concurrency:
+  group: ci-${{ inputs.release_call && 'release-' || '' }}${{ github.event.pull_request.number || format('{0}@{1}', github.ref, github.sha) }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    # Explicit bash: on Windows this is the only way to get -eo pipefail, so a failure inside a
+    # pipeline is not swallowed.
+    shell: bash
+
+jobs:
+  compliance:
+    name: compliance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # The commit checks read this branch's own commits and need origin/<base>, so the full
+      # history is fetched. A pull request is checked at its head, not at the test merge commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      # The attribution checker and its pattern list are byte-identical copies of the
+      # maintainer's canonical files; the pinned digests detect any local edit.
+      - name: Attribution checker matches its pinned sha256
+        if: ${{ !cancelled() }}
+        run: node scripts/ci-checks.mjs pins
+      # The identity rules and the workflow scan have fixed test cases; the tests need no event
+      # context, so they run here rather than on a pull request only. The download helper, the model
+      # and tool fetchers and the synthetic generator have regression tests too; the ones that
+      # download use a server on the loopback interface, none of them touches the network.
+      - name: Script unit tests
+        if: ${{ !cancelled() }}
+        run: node --test scripts/ci-checks.test.mjs scripts/download.test.mjs scripts/fetch-models.test.mjs scripts/fetch-tool.test.mjs bench/gen.test.mjs
+      - name: Commit range and identity rules
+        id: scope
+        if: ${{ !cancelled() }}
+        env:
+          EVENT_NAME: ${{ inputs.release_call && 'workflow_call' || github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+          REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REPO: ${{ github.repository }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_REF: ${{ github.head_ref }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: node scripts/ci-checks.mjs scope >> "$GITHUB_OUTPUT"
+      # Each check runs even when an earlier one failed, so one run reports every problem.
+      - name: Commits (DCO, attribution, identity)
+        if: ${{ !cancelled() }}
+        env:
+          EVENT_NAME: ${{ inputs.release_call && 'workflow_call' || github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+          REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REPO: ${{ github.repository }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_REF: ${{ github.head_ref }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: node scripts/ci-checks.mjs commits
+      - name: Files carry no AI attribution
+        if: ${{ !cancelled() }}
+        run: node scripts/ci-checks.mjs files
+      - name: No personal paths or e-mail addresses
+        if: ${{ !cancelled() }}
+        run: node scripts/ci-checks.mjs privacy
+      - name: No audio or model files
+        if: ${{ !cancelled() }}
+        run: node scripts/ci-checks.mjs assets
+      - name: No pull-request-target trigger
+        if: ${{ !cancelled() }}
+        run: node scripts/ci-checks.mjs pull-request-target
+      # PR titles and bodies are untrusted text: they reach the checker through `env:`, never by
+      # expanding `${{ }}` inside the script.
+      - name: PR title and body carry no AI attribution
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: printf '%s\n\n%s\n' "$PR_TITLE" "$PR_BODY" | node scripts/check-attribution.mjs -
+      # gitleaks is downloaded from its pinned release and verified against the sha256 in
+      # scripts/tools.lock.json before it runs. The working tree is scanned from an export of the
+      # commit, so the scan sees exactly the tracked files and nothing the job wrote (the tool
+      # cache, the target directory).
+      - name: gitleaks (tracked files and branch commits)
+        if: ${{ !cancelled() }}
+        env:
+          BASE: ${{ steps.scope.outputs.base }}
+        run: |
+          tool=$(node scripts/fetch-tool.mjs gitleaks)
+          "$tool" version
+          tree="$RUNNER_TEMP/tree"
+          mkdir -p "$tree"
+          git archive --format=tar HEAD | tar -x -C "$tree"
+          "$tool" dir "$tree" --no-banner --no-color --redact --exit-code 1
+          # A scope step that failed leaves BASE empty; scanning the whole history then reports the
+          # leaks it finds, and the job is already failing on the scope step.
+          if [ -n "$BASE" ]; then range="--log-opts $BASE..HEAD"; else range=""; fi
+          "$tool" git . --no-banner --no-color --redact --exit-code 1 $range
+
+  rust:
+    name: rust (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+            artifact: opentune-beats-windows-x64
+            binary: target/opentune-beats.exe
+          - name: macos-universal2
+            os: macos-latest
+            artifact: opentune-beats-macos-universal2
+            binary: target/opentune-beats
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The runner's rustup installs exactly the pinned toolchain, with the components the
+      # checks below need. `--no-self-update` keeps the runner's own rustup untouched.
+      - name: Install the pinned Rust toolchain
+        shell: bash
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --component rustfmt --component clippy --no-self-update
+          rustup default "$channel"
+          rustc --version
+          cargo --version
+      # Cargo's registry cache is keyed by Cargo.lock: a new dependency invalidates it, a rebuild
+      # of the same tree reuses it.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-registry-${{ runner.os }}-
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: cargo-target-${{ runner.os }}-${{ matrix.name }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('src/**') }}
+          restore-keys: cargo-target-${{ runner.os }}-${{ matrix.name }}-
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+      - name: cargo clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: cargo test
+        run: cargo test --locked
+      # macOS: build both architectures and combine them into one universal binary.
+      - name: Build (macOS universal2)
+        if: matrix.name == 'macos-universal2'
+        shell: bash
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+          lipo -create -output target/opentune-beats \
+            target/aarch64-apple-darwin/release/opentune-beats \
+            target/x86_64-apple-darwin/release/opentune-beats
+          lipo -info target/opentune-beats
+      # Windows: `--target` names the target explicitly, so build scripts and proc-macros are
+      # built for the host and do not get `+crt-static`; only the final binary gets the static CRT
+      # from `.cargo/config.toml`.
+      - name: Build (Windows, static CRT)
+        if: matrix.name == 'windows-x64'
+        shell: bash
+        run: |
+          cargo build --release --locked --target x86_64-pc-windows-msvc
+          cp target/x86_64-pc-windows-msvc/release/opentune-beats.exe target/opentune-beats.exe
+      # The binary must run on a bare runner: it is what a user downloads. The JSON structure is
+      # checked field by field, and the version it reports must be the manifest version.
+      - name: Smoke test the release binary
+        shell: bash
+        run: |
+          "${{ matrix.binary }}" --version
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          "${{ matrix.binary }}" version --json | jq -e --arg version "$version" '
+            (.name == "opentune-beats")
+            and (.version == $version)
+            and (.beatThis | type) == "string"
+            and ((.beatThis | length) > 0)
+            and (.schemaVersion == 1)
+            and ((.models | keys) == ["final", "mel", "small"])
+            and (.models.final.file == "beat_this_final.onnx")
+            and (.models.small.file == "beat_this_small.onnx")
+            and (.models.mel.file == "mel_spectrogram.onnx")
+            and (all(.models[]; ((.file | type) == "string") and (.sha256 | test("^[0-9a-f]{64}$"))))'
+      - name: SHA-256 of the binary
+        shell: bash
+        run: |
+          if command -v sha256sum >/dev/null; then
+            sha256sum "${{ matrix.binary }}" | tee "${{ matrix.binary }}.sha256"
+          else
+            shasum -a 256 "${{ matrix.binary }}" | tee "${{ matrix.binary }}.sha256"
+          fi
+      # Short retention: these artifacts are for inspecting a failing run, not a release.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.binary }}
+            ${{ matrix.binary }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  licenses:
+    name: licenses
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Install the pinned Rust toolchain
+        shell: bash
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --no-self-update
+          rustup default "$channel"
+      # cargo-deny is a prebuilt binary, downloaded and verified against scripts/tools.lock.json;
+      # it is never `cargo install`ed, which would compile an unpinned dependency tree.
+      - name: cargo deny (licenses, bans, sources, advisories)
+        shell: bash
+        run: |
+          tool=$(node scripts/fetch-tool.mjs cargo-deny)
+          "$tool" --version
+          "$tool" --locked check licenses bans sources advisories
+
+  # THIRD-PARTY-NOTICES is generated, and it ships inside both release archives: the tracked copy
+  # must be exactly what the dependency graph of the release targets produces. `cargo fetch`
+  # unpacks the crate packages, whose license files the generator reads; nothing is downloaded by
+  # the generator itself.
+  notices:
+    name: notices
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Install the pinned Rust toolchain
+        shell: bash
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --no-self-update
+          rustup default "$channel"
+      - name: Fetch the crates in Cargo.lock
+        run: cargo fetch --locked
+      - name: THIRD-PARTY-NOTICES matches the release dependency graph
+        run: node scripts/gen-notices.mjs --check
+
+  # The synthetic acceptance check: the beat grid is compared with the tempo map the audio was
+  # rendered from. The audio is generated on the runner and never committed; the model files are
+  # fetched from their pinned URLs and verified against the SHA-256 in the binary. Every map under
+  # bench/ is rendered and scored separately: `bench/tempo-map.json` keeps the beat gate, and the
+  # maps in `bench/maps/` add the tempo-map gate (segment count, per-segment BPM, steady-material
+  # confidence, and the refined inter-beat spread) declared by their `acceptance` object.
+  accuracy:
+    name: accuracy (synthetic)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Install the pinned Rust toolchain
+        shell: bash
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --no-self-update
+          rustup default "$channel"
+      # The final model is about 83 MB: a cache hit keeps the job short. The key is that model's
+      # SHA-256, so a new pin starts a new cache instead of reusing the old file.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: models
+          key: models-5f810debe53459b559127fb55bbad40035bb47cc567b20e501670f968c770f02
+      - name: Fetch the pinned models
+        shell: bash
+        run: node scripts/fetch-models.mjs --dir models --model final
+      - name: Build the release binary
+        shell: bash
+        run: cargo build --release --locked
+      # One render and one analysis per map, into a directory named after the map. Both steps stop
+      # at the first failure: a missing render would only be reported again by the scorer.
+      - name: Render the synthetic backing tracks
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/bench"
+          for map in bench/tempo-map.json bench/maps/*.json; do
+            name=$(basename "$map" .json)
+            node bench/gen.mjs --map "$map" --out "$RUNNER_TEMP/bench/$name.wav"
+          done
+      - name: Analyze them
+        shell: bash
+        run: |
+          for map in bench/tempo-map.json bench/maps/*.json; do
+            name=$(basename "$map" .json)
+            ./target/release/opentune-beats analyze "$RUNNER_TEMP/bench/$name.wav" --models-dir models \
+              > "$RUNNER_TEMP/bench/$name.json"
+          done
+      # Every material is scored even when an earlier one failed, so one run reports every
+      # problem. The job fails when any enabled gate of any material fails.
+      - name: Score against the tempo maps
+        shell: bash
+        run: |
+          status=0
+          for map in bench/tempo-map.json bench/maps/*.json; do
+            name=$(basename "$map" .json)
+            echo "::group::$name"
+            node bench/score.mjs --map "$map" --analysis "$RUNNER_TEMP/bench/$name.json" \
+              --summary "$GITHUB_STEP_SUMMARY" || status=1
+            echo "::endgroup::"
+          done
+          exit "$status"
+
+  # The only required check. Every job above must have succeeded; a skipped or cancelled job is a
+  # failure here, so a required check can never pass because a job silently did not run. No skip is
+  # accepted, not even on a pull-request edit: an edit re-runs every job, so the newest
+  # `beats-gate` of a commit always reflects a full run of that commit.
+  beats-gate:
+    name: beats-gate
+    needs: [compliance, rust, licenses, notices, accuracy]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          status=0
+          for job in compliance rust licenses notices accuracy; do
+            result=$(jq -r --arg job "$job" '.[$job].result // "missing"' <<< "$NEEDS")
+            echo "$job: $result"
+            if [ "$result" != success ]; then
+              echo "::error::$job: $result (must succeed)"
+              status=1
+            fi
+          done
+          # A job added to `needs` but not to the list above would otherwise never be checked.
+          listed=" compliance rust licenses notices accuracy "
+          for job in $(jq -r 'keys[]' <<< "$NEEDS"); do
+            case "$listed" in
+              *" $job "*) ;;
+              *)
+                echo "::error::$job is in needs but not in the list this gate checks"
+                status=1
+                ;;
+            esac
+          done
+          exit "$status"

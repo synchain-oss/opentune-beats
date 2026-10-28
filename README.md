@@ -39,14 +39,36 @@ descriptions.
 
 ## Accuracy
 
-Measured on accompaniments rendered from MIDI files with known tempo maps, including tempo
-changes. Targets: median absolute beat error under 5 ms and 95th percentile under 15 ms. The
-F-measure at ±70 ms is reported as well. The repository holds only the annotations and the
-generation scripts, never audio.
+Measured on accompaniments rendered from MIDI or generated from parameters with known tempo
+maps, including tempo changes, breakdowns and off-beat vocal-like onsets. Targets: median
+absolute beat error under 5 ms and 95th percentile under 15 ms; the F-measure at ±70 ms is
+reported as well. The same synthetic material gates the tempo map itself: one segment for a
+steady track, a segment count within one of the truth for a multi-tempo track, every segment's
+BPM within 1 % of the truth, a confidence of at least 0.8 on steady material, and a refinement
+that does not widen the inter-beat interval spread. The beat F-measure of the multi-tempo
+material is reported but not gated, because the model carries the old tempo for a while after a
+change (see the limitations in [docs/output.md](docs/output.md)). The repository holds only the
+annotations and the generation scripts, never audio.
+
+## Limitations
+
+- A tempo change is followed with a delay: the model keeps the previous tempo for a while, so the
+  beats around a change can be a frame or more late.
+- A breakdown is not invented: `beats` keeps only the beats the model reported. A gap between two
+  segments is described by `segments[].gapAfterSec`, and a caller that needs the beat times inside
+  it derives them from `bpm`.
+- The refinement is only applied when it clearly improves a segment; when it would not, the
+  segment keeps the model's times and reports `refinement: "skipped"`.
+- The confidence is a fit quality, not a probability that the tempo is right.
+- Only WAV is promised; inputs are limited to 2 GiB, one hour and a sample rate of 8 000 to
+  384 000 Hz, and RF64/BW64 is refused.
 
 ## Platforms
 
-CI builds Windows x64 and macOS (universal2) binaries.
+CI builds Windows x64 and macOS (universal2) binaries. Release assets — the two archives, the
+three model files and `SHA256SUMS` — are on the
+[Releases](https://github.com/synchain-oss/opentune-beats/releases) page; see
+[docs/RELEASE.md](docs/RELEASE.md) for how a release is built.
 
 ## License
 
