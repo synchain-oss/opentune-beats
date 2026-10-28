@@ -2,20 +2,22 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 Synchain
 // SPDX-License-Identifier: MIT
 
-// Unit tests for the parts of fetch-models.mjs that need no network: which models a run asks for,
-// and how a downloaded file is written. Run with:
+// Unit tests for the parts of fetch-models.mjs that need no real network: which models a run asks
+// for, how a downloaded file is written, and the download limits (against a local HTTP server on
+// the loopback interface). Run with:
 //
 //   node --test scripts/fetch-models.test.mjs
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { isMainModule, wantedKeys, writeFresh } from './fetch-models.mjs';
+import { MAX_MODEL_BYTES, download, isMainModule, wantedKeys, writeFresh } from './fetch-models.mjs';
 
 const SCRIPT = fileURLToPath(new URL('./fetch-models.mjs', import.meta.url));
 
@@ -114,4 +116,46 @@ test('writeFresh never writes through a symbolic link', (t) => {
   }
   assert.throws(() => writeFresh(file, Buffer.from('payload')), /symbolic link/);
   assert.equal(fs.readFileSync(victim, 'utf8'), 'keep me');
+});
+
+/** Starts a loopback server that is stopped when the test ends; returns its URL. */
+async function serve(t, handler) {
+  const server = http.createServer(handler);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  });
+  return `http://127.0.0.1:${server.address().port}/model.onnx`;
+}
+
+test('the model size limit leaves room above the largest pinned model', () => {
+  // beat_this_final.onnx is 83,162,650 bytes, the largest model.
+  assert.ok(MAX_MODEL_BYTES >= 1.25 * 83_162_650);
+  assert.ok(Number.isSafeInteger(MAX_MODEL_BYTES));
+});
+
+test('download returns a response within the limits', async (t) => {
+  const url = await serve(t, (_request, response) => response.end('model bytes'));
+  assert.equal((await download(url)).toString('utf8'), 'model bytes');
+});
+
+test('download refuses a response announced larger than the model limit', { timeout: 10_000 }, async (t) => {
+  const url = await serve(t, (_request, response) => {
+    response.writeHead(200, { 'content-length': String(MAX_MODEL_BYTES + 1) });
+    response.flushHeaders();
+  });
+  await assert.rejects(download(url), /over the limit of 134217728 bytes/);
+});
+
+test('download refuses a body past an explicit limit', { timeout: 10_000 }, async (t) => {
+  const url = await serve(t, (_request, response) => response.end('x'.repeat(2000)));
+  await assert.rejects(download(url, { maxBytes: 1000 }), /over the limit of 1000 bytes/);
+});
+
+test('download gives up on a server that stalls', { timeout: 10_000 }, async (t) => {
+  const url = await serve(t, () => {
+    // Never respond.
+  });
+  await assert.rejects(download(url, { timeoutMs: 200 }), /no complete response within 0.2 s/);
 });

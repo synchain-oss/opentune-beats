@@ -12,6 +12,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { downloadBytes } from './download.mjs';
+
+/**
+ * The most bytes one model download may carry. The largest model, beat_this_final.onnx, is
+ * 83,162,650 bytes (79.3 MiB); 128 MiB leaves about 50% of room for a model that is re-pinned
+ * slightly larger, and still refuses anything that is clearly not a model. The digest is checked
+ * after the download, so this limit only keeps a wrong or hostile response out of memory.
+ */
+export const MAX_MODEL_BYTES = 128 * 1024 * 1024;
+
 const PIN = '1ae768e78f1ad83b0ed3886241dc29ffde853c40';
 const RAW = `https://raw.githubusercontent.com/danigb/beat-this-rs/${PIN}/models`;
 const MODELS = {
@@ -52,10 +62,15 @@ function digest(file) {
   return createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 }
 
-async function download(url) {
-  const response = await fetch(url, { redirect: 'follow' });
-  if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
-  return Buffer.from(await response.arrayBuffer());
+/**
+ * Downloads one model into memory, with a time limit (DOWNLOAD_TIMEOUT_MS) and the size limit
+ * above. `options` is only for a test.
+ * @param {string} url
+ * @param {{ maxBytes?: number, timeoutMs?: number, fetchImpl?: typeof fetch }} [options]
+ * @returns {Promise<Buffer>}
+ */
+export function download(url, { maxBytes = MAX_MODEL_BYTES, ...rest } = {}) {
+  return downloadBytes(url, { maxBytes, ...rest });
 }
 
 /**
