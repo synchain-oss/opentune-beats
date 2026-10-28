@@ -229,15 +229,36 @@ fn confidence_at(logits: &[f32], time: f64) -> f64 {
 }
 
 /// Check one model file against the digest compiled into the binary.
+///
+/// Only a file that does not exist is "missing". A path that exists but cannot be read (no
+/// permission, a directory, a failing disk) keeps the same code and exit code, because the
+/// contract has no other model error (`docs/output.md`), but the `detail` says what is wrong so
+/// the caller does not go looking for a download that is already there.
 fn verify(path: &Path, entry: &ModelFile) -> Result<(), Failure> {
     let digest = sha256::hash_file(path).map_err(|error| {
-        Failure::new(
-            "MODEL_MISSING",
-            EXIT_MODEL,
+        let detail = if error.kind() == std::io::ErrorKind::NotFound {
             format!(
                 "{file} is missing from the models directory",
                 file = entry.file
-            ),
+            )
+        } else {
+            // The reason is the error kind, which is fixed English text, not the operating
+            // system's message: that one can be localized and may carry a path. A directory
+            // opens with a generic kind on some platforms, so it is named explicitly.
+            let reason = if path.is_dir() {
+                "it is a directory".to_string()
+            } else {
+                error.kind().to_string()
+            };
+            format!(
+                "{file} exists but cannot be read: {reason}",
+                file = entry.file
+            )
+        };
+        Failure::new(
+            "MODEL_MISSING",
+            EXIT_MODEL,
+            detail,
             format!("{}: {error}", path.display()),
         )
     })?;
@@ -338,6 +359,130 @@ mod tests {
         assert!(confidence_at(&[8.0], 0.0) > 0.99);
         assert!(confidence_at(&[-8.0], 0.0) < 0.01);
         assert!((confidence_at(&[], 1.0) - 0.5).abs() < 1e-9);
+    }
+
+    /// A scratch directory under the system temp directory, emptied first and removed on drop.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("ot-beats-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("creates the scratch directory");
+            Self(path)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_model_that_does_not_exist_is_missing() {
+        let scratch = Scratch::new("model-missing");
+        let failure = verify(&scratch.0.join("absent.onnx"), &models::SMALL).expect_err("fails");
+        assert_eq!(failure.code, "MODEL_MISSING");
+        assert_eq!(failure.exit, EXIT_MODEL);
+        assert_eq!(
+            failure.detail,
+            "beat_this_small.onnx is missing from the models directory"
+        );
+        assert!(failure.message.contains("absent.onnx"));
+    }
+
+    #[test]
+    fn a_model_path_that_cannot_be_read_is_not_called_missing() {
+        // A directory where the model file should be: it exists, but it cannot be hashed.
+        let scratch = Scratch::new("model-directory");
+        let failure = verify(&scratch.0, &models::FINAL).expect_err("fails");
+        // The contract has no other model error code: the code and the exit code stay.
+        assert_eq!(failure.code, "MODEL_MISSING");
+        assert_eq!(failure.exit, EXIT_MODEL);
+        assert_eq!(
+            failure.detail,
+            "beat_this_final.onnx exists but cannot be read: it is a directory"
+        );
+        assert!(!failure.detail.contains("missing"));
+        // The detail never repeats the path; stderr names it.
+        assert!(!failure.detail.contains("ot-beats"));
+        assert!(failure.message.contains("ot-beats-model-directory"));
+    }
+
+    #[test]
+    fn a_model_with_the_wrong_content_is_a_checksum_error() {
+        let scratch = Scratch::new("model-checksum");
+        let path = scratch.0.join("beat_this_small.onnx");
+        std::fs::write(&path, b"not a model").expect("writes");
+        let failure = verify(&path, &models::SMALL).expect_err("fails");
+        assert_eq!(failure.code, "MODEL_CHECKSUM");
+        assert_eq!(failure.exit, EXIT_MODEL);
+    }
+
+    /// A tiny WAV file: one second of 16-bit mono silence at `rate`.
+    fn silent_wav(rate: u32) -> Vec<u8> {
+        let data = vec![0u8; rate as usize * 2];
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"WAVEfmt ");
+        out.extend_from_slice(&16u32.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&rate.to_le_bytes());
+        out.extend_from_slice(&(rate * 2).to_le_bytes());
+        out.extend_from_slice(&2u16.to_le_bytes());
+        out.extend_from_slice(&16u16.to_le_bytes());
+        out.extend_from_slice(b"data");
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&data);
+        out
+    }
+
+    #[test]
+    fn an_unsupported_sample_rate_is_an_input_error() {
+        let scratch = Scratch::new("sample-rate");
+        for rate in [1u32, 7_999, 384_001] {
+            let path = scratch.0.join(format!("rate-{rate}.wav"));
+            // The header carries the rate; a short body is enough, the header is read first.
+            let mut bytes = silent_wav(8_000);
+            bytes[24..28].copy_from_slice(&rate.to_le_bytes());
+            std::fs::write(&path, bytes).expect("writes");
+            let request = Request {
+                input: &path,
+                model: Model::Final,
+                models_dir: None,
+                refine: true,
+                min_segment_beats: 8,
+                pretty: false,
+            };
+            let failure = run(&request).expect_err("fails");
+            assert_eq!(failure.code, "INPUT_UNREADABLE", "rate {rate}");
+            assert_eq!(failure.exit, EXIT_INPUT, "rate {rate}");
+            assert!(failure.detail.contains("8000 to 384000"), "rate {rate}");
+            assert!(!failure.detail.contains("rate-"), "rate {rate}");
+        }
+    }
+
+    #[test]
+    fn a_supported_sample_rate_gets_past_the_decoder() {
+        // 8 000 Hz decodes; with no models directory the run then stops at the models, which is
+        // a different error from the input one.
+        let scratch = Scratch::new("sample-rate-ok");
+        let path = scratch.0.join("ok.wav");
+        std::fs::write(&path, silent_wav(8_000)).expect("writes");
+        let empty = scratch.0.join("no-models");
+        let request = Request {
+            input: &path,
+            model: Model::Final,
+            models_dir: Some(&empty),
+            refine: true,
+            min_segment_beats: 8,
+            pretty: false,
+        };
+        let failure = run(&request).expect_err("fails");
+        assert_eq!(failure.code, "MODEL_MISSING");
     }
 
     #[test]

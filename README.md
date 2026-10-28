@@ -60,7 +60,8 @@ annotations and the generation scripts, never audio.
 - The refinement is only applied when it clearly improves a segment; when it would not, the
   segment keeps the model's times and reports `refinement: "skipped"`.
 - The confidence is a fit quality, not a probability that the tempo is right.
-- Only WAV is promised; inputs are limited to 2 GiB and RF64/BW64 is refused.
+- Only WAV is promised; inputs are limited to 2 GiB, one hour and a sample rate of 8 000 to
+  384 000 Hz, and RF64/BW64 is refused.
 
 ## Platforms
 

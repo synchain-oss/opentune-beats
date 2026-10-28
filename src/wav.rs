@@ -1,8 +1,9 @@
 //! WAV decoding.
 //!
-//! The contract promises PCM 16/24/32 and IEEE float 32, any sample rate, mono or stereo; other
-//! channel counts are averaged down as well. The decoder is deliberately strict: a malformed
-//! header is an input error, not something to guess around.
+//! The contract promises PCM 8/16/24/32 and IEEE float 32, a sample rate from 8 000 to
+//! 384 000 Hz, at most one hour of audio, mono or stereo; other channel counts are averaged down
+//! as well. The decoder is deliberately strict: a malformed header is an input error, not
+//! something to guess around.
 
 /// Decoded audio, downmixed to mono.
 pub struct Audio {
@@ -51,7 +52,41 @@ const STREAMED_CHUNK_SIZE: u32 = 0xFFFF_FFFF;
 /// The reason an RF64/BW64 file is refused: it is a real WAV family, not a broken RIFF file.
 const RF64_REASON: &str = "RF64/BW64 WAV files are not supported; write a plain RIFF/WAVE file";
 
+/// The lowest sample rate accepted. Telephone-band audio (8 kHz) is the floor of anything a
+/// beat tracker can use; a header that says 1 Hz is damaged or hostile, and a tiny rate makes
+/// the resampler's ratio and the duration arithmetic meaningless.
+pub const MIN_SAMPLE_RATE_HZ: u32 = 8_000;
+/// The highest sample rate accepted: 384 kHz is the top of what audio interfaces and DSD-to-PCM
+/// tools write. A larger rate in a header only inflates the resampler's work for no gain.
+pub const MAX_SAMPLE_RATE_HZ: u32 = 384_000;
+/// The reason a sample rate outside the range above is refused.
+const SAMPLE_RATE_REASON: &str =
+    "the WAV file has an unsupported sample rate (supported: 8000 to 384000 Hz)";
+
+/// The longest input accepted, in seconds. One hour covers a single song and the usual DJ
+/// mixes with room to spare, while the decoded mono f32 samples stay bounded (about 0.7 GB at
+/// 48 kHz) and so does the work that follows. The limit is checked on the number of frames the
+/// `data` chunk holds, before any sample is decoded, so a header cannot make the tool allocate
+/// first and refuse later.
+pub const MAX_DURATION_SEC: f64 = 3600.0;
+/// The reason an input longer than `MAX_DURATION_SEC` is refused.
+const DURATION_REASON: &str =
+    "the WAV file is longer than the supported limit of one hour (3600 seconds)";
+
+/// True when `frames` samples per channel at `sample_rate` Hz last longer than `max_seconds`.
+/// The comparison is `frames > max_seconds * rate`, which is exact for these magnitudes (both
+/// sides are integers below 2^53), so a file of exactly the limit is accepted and one frame more
+/// is refused.
+fn exceeds_duration(frames: usize, sample_rate: u32, max_seconds: f64) -> bool {
+    frames as f64 > max_seconds * f64::from(sample_rate)
+}
+
 pub fn decode(bytes: &[u8]) -> Result<Audio, WavError> {
+    decode_limited(bytes, MAX_DURATION_SEC)
+}
+
+/// `decode` with an explicit duration limit, so the limit's wiring can be tested on a few bytes.
+fn decode_limited(bytes: &[u8], max_seconds: f64) -> Result<Audio, WavError> {
     if bytes.len() < 12 {
         return Err(WavError::NotWave);
     }
@@ -91,7 +126,7 @@ pub fn decode(bytes: &[u8]) -> Result<Audio, WavError> {
     }
     let format = format.ok_or(WavError::Truncated)?;
     let data = data.ok_or(WavError::Truncated)?;
-    decode_samples(&format, data)
+    decode_samples(&format, data, max_seconds)
 }
 
 fn parse_format(body: &[u8]) -> Result<Format, WavError> {
@@ -114,10 +149,8 @@ fn parse_format(body: &[u8]) -> Result<Format, WavError> {
             "the WAV file has an unsupported channel count",
         ));
     }
-    if sample_rate == 0 {
-        return Err(WavError::Unsupported(
-            "the WAV file has a sample rate of zero",
-        ));
+    if !(MIN_SAMPLE_RATE_HZ..=MAX_SAMPLE_RATE_HZ).contains(&sample_rate) {
+        return Err(WavError::Unsupported(SAMPLE_RATE_REASON));
     }
     Ok(Format {
         code,
@@ -127,7 +160,7 @@ fn parse_format(body: &[u8]) -> Result<Format, WavError> {
     })
 }
 
-fn decode_samples(format: &Format, data: &[u8]) -> Result<Audio, WavError> {
+fn decode_samples(format: &Format, data: &[u8], max_seconds: f64) -> Result<Audio, WavError> {
     let bytes_per_sample = match (format.code, format.bits) {
         (1, 8) | (1, 16) | (1, 24) | (1, 32) | (3, 32) => (format.bits / 8) as usize,
         _ => {
@@ -143,6 +176,10 @@ fn decode_samples(format: &Format, data: &[u8]) -> Result<Audio, WavError> {
         ));
     }
     let frames = data.len() / frame_bytes;
+    // Before the buffer for the decoded samples is allocated, and long before resampling.
+    if exceeds_duration(frames, format.sample_rate, max_seconds) {
+        return Err(WavError::Unsupported(DURATION_REASON));
+    }
     let mut samples = Vec::with_capacity(frames);
     for frame in data.chunks_exact(frame_bytes) {
         let mut sum = 0.0f32;
@@ -213,7 +250,7 @@ mod tests {
         out.extend_from_slice(&channels.to_le_bytes());
         out.extend_from_slice(&rate.to_le_bytes());
         let block = channels as u32 * (bits as u32 / 8);
-        out.extend_from_slice(&(rate * block).to_le_bytes());
+        out.extend_from_slice(&rate.wrapping_mul(block).to_le_bytes());
         out.extend_from_slice(&(block as u16).to_le_bytes());
         out.extend_from_slice(&bits.to_le_bytes());
         out.extend_from_slice(b"data");
@@ -293,5 +330,81 @@ mod tests {
         let error = decode(&wav(6, 1, 8_000, 8, &[0])).err().expect("fails");
         let reason = "the WAV file uses an unsupported sample format";
         assert_eq!(error, WavError::Unsupported(reason));
+    }
+
+    #[test]
+    fn eight_bit_pcm_is_unsigned_and_decodes() {
+        // 8-bit WAV is unsigned: 128 is silence, 0 the negative peak, 255 just under the positive.
+        let audio = decode(&wav(1, 1, 8_000, 8, &[128, 255, 0])).expect("decodes");
+        assert_eq!(audio.samples, vec![0.0, 127.0 / 128.0, -1.0]);
+    }
+
+    #[test]
+    fn sample_rates_outside_the_supported_range_are_refused() {
+        let refused = WavError::Unsupported(SAMPLE_RATE_REASON);
+        for rate in [0, 1, 7_999, 384_001, u32::MAX] {
+            let error = decode(&wav(1, 1, rate, 16, &[0, 0])).err().expect("fails");
+            assert_eq!(error, refused, "rate {rate}");
+        }
+        assert!(SAMPLE_RATE_REASON.contains("8000 to 384000"));
+    }
+
+    #[test]
+    fn the_edges_of_the_supported_sample_rate_range_decode() {
+        for rate in [MIN_SAMPLE_RATE_HZ, MAX_SAMPLE_RATE_HZ] {
+            let audio = decode(&wav(1, 1, rate, 16, &[0, 0, 0, 0])).expect("decodes");
+            assert_eq!(audio.sample_rate, rate);
+            assert_eq!(audio.samples.len(), 2);
+        }
+        assert_eq!((MIN_SAMPLE_RATE_HZ, MAX_SAMPLE_RATE_HZ), (8_000, 384_000));
+    }
+
+    #[test]
+    fn the_duration_limit_is_one_hour_and_exact() {
+        assert_eq!(MAX_DURATION_SEC, 3600.0);
+        for rate in [
+            MIN_SAMPLE_RATE_HZ,
+            22_050,
+            44_100,
+            48_000,
+            96_000,
+            MAX_SAMPLE_RATE_HZ,
+        ] {
+            let hour = 3600 * rate as usize;
+            assert!(!exceeds_duration(0, rate, MAX_DURATION_SEC), "rate {rate}");
+            assert!(
+                !exceeds_duration(hour - 1, rate, MAX_DURATION_SEC),
+                "rate {rate}"
+            );
+            assert!(
+                !exceeds_duration(hour, rate, MAX_DURATION_SEC),
+                "rate {rate}"
+            );
+            assert!(
+                exceeds_duration(hour + 1, rate, MAX_DURATION_SEC),
+                "rate {rate}"
+            );
+        }
+        assert!(DURATION_REASON.contains("one hour"));
+    }
+
+    #[test]
+    fn the_duration_limit_is_enforced_while_decoding() {
+        // The real limit would need an hour of samples; a limit of one second needs 8 000 bytes
+        // at 8 kHz, 8-bit mono, and exercises the same code path.
+        let one_second = vec![128u8; 8_000];
+        let audio = decode_limited(&wav(1, 1, 8_000, 8, &one_second), 1.0).expect("decodes");
+        assert_eq!(audio.samples.len(), 8_000);
+
+        let one_frame_more = vec![128u8; 8_001];
+        let error = decode_limited(&wav(1, 1, 8_000, 8, &one_frame_more), 1.0)
+            .err()
+            .expect("fails");
+        assert_eq!(error, WavError::Unsupported(DURATION_REASON));
+        // The frames are counted, not the bytes: stereo 16-bit has 4 bytes per frame.
+        let stereo = vec![0u8; 8_000 * 4];
+        assert!(decode_limited(&wav(1, 2, 8_000, 16, &stereo), 1.0).is_ok());
+        // The public entry point applies the one-hour limit, which these inputs are far below.
+        assert!(decode(&wav(1, 1, 8_000, 8, &one_frame_more)).is_ok());
     }
 }
