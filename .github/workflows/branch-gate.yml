@@ -1,0 +1,85 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Synchain
+# SPDX-License-Identifier: MIT
+name: Branch Gate
+
+# Source branch, DCO and identity rules for a pull request into dev or prod. The required CI check
+# is `beats-gate` in ci.yml; this workflow is a separate gate because its rules only apply to a
+# pull request into dev or prod, and a check that is required but does not run would block every
+# other pull request forever. The job is named `branch-gate` and has no `if:`.
+#
+# The rules live in scripts/ci-checks.mjs; this file only passes the GitHub event context through
+# `env:`.
+#   1. Source branch: dev takes feat/*, feature/* and dependabot/* of this repository; prod takes
+#      only dev. A fork may use any branch name except the long-lived ones (dev, prod, feature/*),
+#      so that it cannot pose as a promotion.
+#   2. Commits: DCO sign-off (merge commits exempt), no AI attribution, no personal paths or
+#      addresses in the message; the author and committer must be the project identity. A pull
+#      request from a fork may carry its author's own address; dev -> prod carries dev's history,
+#      which was gated when it entered dev.
+#   3. The pull request title and body carry no AI attribution. The body is untrusted text and
+#      reaches the checker through `env:`, never by expanding `${{ }}` inside the script.
+#
+# types includes `edited`: changing the base, the title or the body runs the checks again.
+# This workflow reads no secret, so a pull request from a fork can run it too.
+on:
+  pull_request:
+    branches: [dev, prod]
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: branch-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  branch-gate:
+    name: branch-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # The pull request's own commits, not the test merge commit GitHub builds, and the full
+      # history so that origin/<base> exists.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      # The checks use only Node built-in modules and git: nothing to install.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      # The checks and this workflow itself come from the pull request's head. A pull request that
+      # edits them can therefore make its own gate pass, so a change to .github/workflows/ or to
+      # scripts/ci-checks.mjs is reviewed by a maintainer before it is merged. Closing that gap
+      # would take pull_request_target, which this project never uses.
+      - name: Source branch
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
+        run: node scripts/ci-checks.mjs branch
+      # `!cancelled()` lets the remaining steps run after a failure, so one run reports every
+      # problem instead of only the first.
+      - name: Commits (DCO, attribution, identity)
+        if: ${{ !cancelled() }}
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: node scripts/ci-checks.mjs commits
+      - name: PR title and body carry no AI attribution
+        if: ${{ !cancelled() }}
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: printf '%s\n\n%s\n' "$PR_TITLE" "$PR_BODY" | node scripts/check-attribution.mjs -

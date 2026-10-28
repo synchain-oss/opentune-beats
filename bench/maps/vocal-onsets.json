@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "name": "steady 100 BPM with off-beat vocal onsets",
+  "sampleRate": 44100,
+  "beatsPerBar": 4,
+  "leadInSec": 0.5,
+  "segments": [{ "bpm": 100, "bars": 16 }],
+  "vocalOnsets": true,
+  "acceptance": { "beats": true, "tempoMap": true }
+}

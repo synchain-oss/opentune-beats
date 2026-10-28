@@ -1,0 +1,38 @@
+[package]
+name = "opentune-beats"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.99"
+license = "MIT"
+description = "Beat, downbeat and tempo-map analysis for backing tracks"
+repository = "https://github.com/synchain-oss/opentune-beats"
+homepage = "https://github.com/synchain-oss/opentune-beats"
+readme = "README.md"
+authors = ["Synchain"]
+# A command-line tool, not a library: it is distributed as a release binary, never from
+# crates.io. `cargo publish` refuses to run with this set.
+publish = false
+
+[[bin]]
+name = "opentune-beats"
+path = "src/main.rs"
+
+# The Beat This! model and its pure-Rust ONNX runtime. `default-features = false` drops the CLI,
+# the audio decoders (symphonia is MPL-2.0, outside the allow list) and serde: the WAV decoder,
+# the JSON writer and the SHA-256 check are ours, and `rten` needs no system library, so the
+# release stays one executable (docs/output.md, section 5).
+[dependencies]
+beat-this = { version = "=1.1.0", default-features = false }
+
+# The release profile keeps the default `panic = "unwind"` on purpose, and must not be changed to
+# `"abort"`: `main.rs` catches a panic in the analysis (the decoder, the post-processing or a
+# third-party crate) with `catch_unwind` and turns it into the contract's `ANALYSIS_FAILED` error
+# JSON and exit code 5. With `panic = "abort"` the process would end without any JSON.
+[profile.release]
+codegen-units = 1
+lto = "thin"
+
+[lints.rust]
+# The audio and JSON paths handle untrusted input. Any unsafe block needs a review and an
+# explicit exception, so the compiler rejects one that slips in.
+unsafe_code = "forbid"

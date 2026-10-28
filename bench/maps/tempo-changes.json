@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "four tempo changes 92-110-128-100",
+  "sampleRate": 44100,
+  "beatsPerBar": 4,
+  "leadInSec": 0.5,
+  "segments": [
+    { "bpm": 92, "bars": 12 },
+    { "bpm": 110, "bars": 12 },
+    { "bpm": 128, "bars": 12 },
+    { "bpm": 100, "bars": 12 }
+  ],
+  "acceptance": { "beats": false, "tempoMap": true }
+}

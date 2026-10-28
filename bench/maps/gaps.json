@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "steady 100 BPM with two 3-bar gaps",
+  "sampleRate": 44100,
+  "beatsPerBar": 4,
+  "leadInSec": 0.5,
+  "segments": [{ "bpm": 100, "bars": 16 }],
+  "gaps": [
+    { "startBar": 5, "bars": 3 },
+    { "startBar": 11, "bars": 3 }
+  ],
+  "acceptance": { "beats": false, "tempoMap": true }
+}

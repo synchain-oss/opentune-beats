@@ -1,0 +1,20 @@
+# attribution-patterns.txt — canonical list of AI-attribution patterns. Commit messages,
+# pull request text and repository files must not credit an AI tool (co-author or session
+# trailers, tool taglines and their links, the vendor's noreply address).
+# The maintainer's copy is the source of truth. The MCP repo (scripts/) and the fork
+# (.github/scripts/) carry byte-identical copies; local gates compare sha256.
+#
+# Format: one rule per line, "<id><TAB or spaces><JavaScript regex>".
+# Matching is case-insensitive and runs per line, after Unicode NFKC normalisation and
+# removal of zero-width characters. Lines starting with # are comments.
+#
+# Scanners that read whole files must exclude this file itself and test fixtures.
+
+co-authored-claude        ^\s*co-authored-by\s*:.*\b(claude|anthropic)\b
+co-authored-anthropic     ^\s*co-authored-by\s*:.*@anthropic\.com
+anthropic-noreply         noreply@anthropic\.com
+claude-session-trailer    ^\s*claude-session\s*:
+generated-with-claude     generated\s+(with|by)\s+\[?\s*claude(\s+code)?\b
+claude-code-link          claude\.ai/code
+claude-code-site          claude\.com/claude-code
+robot-generated           \u{1F916}\s*generated\s+(with|by)
