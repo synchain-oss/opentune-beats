@@ -511,7 +511,7 @@ jobs:
           diff -u "$RUNNER_TEMP/release-notes.check.md" dist/release-notes.md
           node scripts/check-attribution.mjs dist/release-notes.md
       - name: Create the draft release
-        uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ needs.preflight.outputs.tag }}
           name: OpenTune Beats ${{ needs.preflight.outputs.tag }}
