@@ -74,8 +74,8 @@ cargo fmt --all --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 node scripts/ci-checks.mjs pins      # 署名检查器与其模式表未被改动
-# 身份规则与 workflow 扫描的固定用例；模型下载脚本与合成器的回归用例
-node --test scripts/ci-checks.test.mjs scripts/fetch-models.test.mjs bench/gen.test.mjs
+# 身份规则与 workflow 扫描的固定用例；下载（超时与大小上限）、模型与工具下载脚本、合成器的回归用例
+node --test scripts/ci-checks.test.mjs scripts/download.test.mjs scripts/fetch-models.test.mjs scripts/fetch-tool.test.mjs bench/gen.test.mjs
 node scripts/gen-notices.mjs --check     # THIRD-PARTY-NOTICES 与发布依赖图一致
 node scripts/ci-checks.mjs files     # 无 AI 署名
 node scripts/ci-checks.mjs privacy   # 无个人路径与个人邮箱

@@ -12,13 +12,24 @@
 
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { realpathSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { downloadBytes } from './download.mjs';
+
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const LOCK_FILE = 'scripts/tools.lock.json';
 export const CACHE_DIR = '.cache/tools';
+/**
+ * The most bytes one tool archive may carry. The largest pinned asset is the gitleaks Windows x64
+ * archive at 8,438,883 bytes (cargo-deny's are under 5 MB); 64 MiB leaves ample room for a newer
+ * pin and still refuses a response that is clearly not a tool archive. The sha256 of the archive
+ * is checked after the download, so this limit only keeps a wrong or hostile response out of
+ * memory. Revisit it when a pinned tool grows past a few tens of megabytes.
+ */
+export const MAX_TOOL_ARCHIVE_BYTES = 64 * 1024 * 1024;
 
 /**
  * @typedef {object} ResolvedTool
@@ -71,10 +82,15 @@ async function sha256Of(file) {
     .digest('hex');
 }
 
-async function download(url, file) {
-  const response = await fetch(url, { redirect: 'follow' });
-  if (!response.ok) throw new Error(`download failed: ${url} -> HTTP ${response.status}`);
-  await fs.writeFile(file, Buffer.from(await response.arrayBuffer()));
+/**
+ * Downloads `url` to `file`, with a time limit and `MAX_TOOL_ARCHIVE_BYTES`. The file is only
+ * written when the whole body arrived within both limits. The options are for a test.
+ * @param {string} url
+ * @param {string} file
+ * @param {{ maxBytes?: number, timeoutMs?: number, fetchImpl?: typeof fetch }} [options]
+ */
+async function download(url, file, { maxBytes = MAX_TOOL_ARCHIVE_BYTES, ...rest } = {}) {
+  await fs.writeFile(file, await downloadBytes(url, { maxBytes, ...rest }));
 }
 
 function extract(archive, dir, member) {
@@ -97,7 +113,8 @@ function extract(archive, dir, member) {
 /**
  * Downloads (or reuses) the verified archive and extracts the binary. Returns its path.
  * @param {string} name
- * @param {{ root?: string, platform?: string, arch?: string }} [options]
+ * @param {{ root?: string, platform?: string, arch?: string, maxBytes?: number,
+ *   timeoutMs?: number, fetchImpl?: typeof fetch }} [options] the last three are for a test
  * @returns {Promise<ResolvedTool & { path: string }>}
  */
 export async function fetchTool(name, options = {}) {
@@ -106,7 +123,11 @@ export async function fetchTool(name, options = {}) {
   const archive = path.join(tool.dir, tool.asset);
   let digest = await sha256Of(archive).catch(() => null);
   if (digest !== tool.sha256) {
-    await download(tool.url, archive);
+    await download(tool.url, archive, {
+      maxBytes: options.maxBytes,
+      timeoutMs: options.timeoutMs,
+      fetchImpl: options.fetchImpl,
+    });
     digest = await sha256Of(archive);
   }
   if (digest !== tool.sha256) {
@@ -127,8 +148,26 @@ export async function fetchTool(name, options = {}) {
   return { ...tool, path: binary };
 }
 
-const isMain = process.argv[1] !== undefined && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-if (isMain) {
+/**
+ * True when this file is the one the process was started with. Both sides are resolved through
+ * symbolic links (and, on Windows, junctions and short names): `import.meta.url` holds the real
+ * path of the module, while `process.argv[1]` holds the path as it was typed, so a plain
+ * `path.resolve` comparison is false for a script started through a link and the script would
+ * exit 0 without doing anything. A path that cannot be resolved is not the main module.
+ * Same rule as fetch-models.mjs.
+ * @param {string} [entry] the path the process was started with
+ * @returns {boolean}
+ */
+export function isMainModule(entry = process.argv[1]) {
+  if (!entry) return false;
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule()) {
   const name = process.argv[2];
   if (!name) {
     process.stderr.write('usage: node scripts/fetch-tool.mjs <tool>\n');

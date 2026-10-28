@@ -42,8 +42,10 @@ Naming rules:
      `prod` (`git merge-base --is-ancestor`);
    - `checks`: the whole CI suite through `workflow_call` (`ci.yml`: fmt, clippy, tests,
      compliance, `cargo deny`, the notices check and the accuracy bench);
-   - `build-windows`, `build-macos`, `models`: build and smoke-test both binaries, pack the two
-     archives, fetch the pinned models;
+   - `build-windows`, `build-macos`, `models`: fetch the pinned models, build and smoke-test both
+     binaries, pack the two archives, then unpack each archive the way a caller installs it
+     (executable at the root, the models in `models/` next to it) and run `analyze` on it with
+     both models (`scripts/release-smoke.sh`, below);
    - `package`: collect the assets, write `SHA256SUMS`, generate the release body with
      `scripts/release-notes.mjs` and check it with `scripts/check-attribution.mjs`;
    - `release`: create the release as a **draft**, with all assets and that body.
@@ -67,6 +69,18 @@ the digests. The result is the `release-assets` artifact of that run; no release
 Use it after changing the workflow, after a `Cargo.toml` version bump (a dry run on `dev` proves
 the archive names), and before pushing a tag.
 
+## The inference smoke test
+
+`--version` only shows that a binary starts. After packing, each build job therefore unpacks its
+own archive into `opentune-beats-<version>-<target>/`, puts the three model files (the artifact of
+the `models` job, the files that ship) into `models/` next to the executable, and runs
+`scripts/release-smoke.sh` on it. The script renders a synthetic 120 BPM track of about ten
+seconds (`bench/release-smoke.json`; the audio is never committed), runs `analyze` once with
+`--model final` and once with `--model small`, and does not pass `--models-dir`, so it also proves
+that the binary finds the models where a caller puts them. It requires exit code 0, one JSON object
+on one line with the fields of the contract, and a `dominantBpm` within 2 BPM of 120. The macOS job
+runs on an arm64 runner, so it exercises the arm64 slice of the universal binary.
+
 ## What the workflow refuses
 
 - A tag that is not `v` + the `Cargo.toml` version.
@@ -74,6 +88,7 @@ the archive names), and before pushing a tag.
 - An asset set that is not exactly the five files above (`scripts/release-notes.mjs` fails on a
   missing or an unexpected file).
 - A zip entry with a backslash, and a `tar.gz` that does not keep the executable bit.
+- A packed binary that cannot analyse: the smoke test above fails the build job.
 - A model whose bytes do not match the pinned SHA-256.
 - A release body that fails the attribution rules.
 - Anything, when the CI suite fails: the release job needs `checks` and `package`.
@@ -90,6 +105,7 @@ lipo -create -output opentune-beats \
   target/aarch64-apple-darwin/release/opentune-beats \
   target/x86_64-apple-darwin/release/opentune-beats
 node scripts/fetch-models.mjs --dir models --model all
+bash scripts/release-smoke.sh <install dir> opentune-beats <scratch dir>   # install dir: exe + models/
 cargo fetch --locked                                                # gen-notices reads the packages
 node scripts/release-notes.mjs --version 0.1.0 --assets dist
 node scripts/check-attribution.mjs dist/release-notes.md

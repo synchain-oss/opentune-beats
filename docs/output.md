@@ -37,7 +37,7 @@ opentune-beats --version
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `<input>` | – | A WAV file (PCM 16/24/32-bit or float32, any sample rate, mono or stereo). Other formats that the decoder handles are supported on a best-effort basis; only WAV is promised. The file may be at most 2 GiB; RF64/BW64 files are refused with a clear message, as is a `data` chunk larger than the file. |
+| `<input>` | – | A WAV file (PCM 8/16/24/32-bit or float32, mono or stereo; up to 8 channels are averaged to mono). The sample rate must be from 8 000 to 384 000 Hz and the audio at most 3 600 seconds (one hour) long; a file outside either limit is `INPUT_UNREADABLE`. 8-bit PCM is the unsigned form WAV uses. Other formats that the decoder handles are supported on a best-effort basis; only WAV is promised. The file may be at most 2 GiB; RF64/BW64 files are refused with a clear message, as is a `data` chunk larger than the file. |
 | `--model final\|small` | `final` | Which beat model to run. `final` is about 80 MB and more accurate; `small` is about 10 MB. |
 | `--models-dir <dir>` | `<directory of the executable>/models` | Where the model files are read from. |
 | `--pretty` | off | Indent the JSON output. |
@@ -47,7 +47,10 @@ opentune-beats --version
 `--models-dir` must contain `mel_spectrogram.onnx` and, depending on `--model`,
 `beat_this_final.onnx` or `beat_this_small.onnx`. The SHA-256 of each file is compiled into the
 binary and checked before the model is loaded; a mismatch is exit code 3 with `MODEL_CHECKSUM`,
-a missing file is exit code 3 with `MODEL_MISSING`. Nothing is downloaded at run time.
+a missing file is exit code 3 with `MODEL_MISSING`. A path that exists but cannot be read (no
+permission, a directory where the file should be) is also exit code 3 with `MODEL_MISSING`: there
+is no separate code for it, but its `detail` reads "exists but cannot be read" with the reason
+instead of "is missing". Nothing is downloaded at run time.
 
 `--version` and `version` never load a model, so they work in a directory with no models and are
 the self-check a caller runs after installing the binary.
@@ -152,15 +155,19 @@ the self-check a caller runs after installing the binary.
 | --- | --- |
 | 0 | Success |
 | 2 | Usage error (`USAGE`): unknown command or option, a missing or invalid value |
-| 3 | A model file is missing (`MODEL_MISSING`) or its SHA-256 does not match (`MODEL_CHECKSUM`) |
-| 4 | The input cannot be read or decoded (`INPUT_UNREADABLE`), or is too short to analyse (`INPUT_TOO_SHORT`) |
-| 5 | Analysis failed for any other reason (`ANALYSIS_FAILED`) |
+| 3 | A model file is missing or cannot be read (`MODEL_MISSING`) or its SHA-256 does not match (`MODEL_CHECKSUM`) |
+| 4 | The input cannot be read or decoded (`INPUT_UNREADABLE`), including a sample rate outside 8 000 to 384 000 Hz and audio longer than 3 600 seconds, or is too short to analyse (`INPUT_TOO_SHORT`) |
+| 5 | Analysis failed for any other reason (`ANALYSIS_FAILED`), including an internal error (a panic) in the decoder, the post-processing or a dependency |
 
 If stdout cannot be written (for example the reader closed the pipe) after an `analyze` run that
 would have exited 0, the run exits 5 instead. This is a behaviour change for analysis runs: the
 analysis result was lost, and a caller that reads stdout must be able to tell. A run that already
 exits non-zero keeps its code (2, 3, 4, 5), so the error class is not hidden. `version`,
 `--version` and `--help` still exit 0 when stdout cannot be written, as before.
+
+A panic inside the analysis is caught: the run exits 5 with `ANALYSIS_FAILED` and a fixed `detail`
+("the analysis stopped on an internal error"), and one line with the panic message goes to stderr.
+A panic therefore never ends the process without the error JSON.
 
 On any non-zero exit, stdout still carries one JSON object:
 
@@ -220,15 +227,20 @@ so a release directory needs no arguments beyond the input file.
 
 The pipeline is fixed, and a stored result can be reproduced from `params` and `model`:
 
-1. **Input.** The file is read and decoded as WAV (PCM 8/16/24/32 or IEEE float 32, any sample
-   rate, any channel count up to 8, averaged to mono). A file larger than 2 GiB is refused, and at
+1. **Input.** The file is read and decoded as WAV (PCM 8/16/24/32 or IEEE float 32, a sample rate
+   of 8 000 to 384 000 Hz, any channel count up to 8, averaged to mono). A sample rate outside that
+   range is refused, and so is audio longer than 3 600 seconds (one hour): the duration is the
+   number of frames in the `data` chunk divided by the sample rate, and it is checked before any
+   sample is decoded or resampled. Both are `INPUT_UNREADABLE` (exit code 4), with a `detail` that
+   names the limit. A file larger than 2 GiB is refused, and at
    most 2 GiB and one byte of it is ever read; a `data` chunk whose declared size is `0xFFFFFFFF` (a streaming writer) is read to
    the end of the file; RF64/BW64, which needs a 64-bit size field, is refused with a message that
    says so. A file that is not a readable WAV is
    `INPUT_UNREADABLE`; one shorter than half a second is `INPUT_TOO_SHORT`.
 2. **Models.** `mel_spectrogram.onnx` and the beat model of `--model` are hashed before they are
    loaded. The expected digests are compilation constants (`version --json` publishes them), so a
-   swapped or corrupted file is `MODEL_CHECKSUM`, and a missing one is `MODEL_MISSING`.
+   swapped or corrupted file is `MODEL_CHECKSUM`, and a missing one is `MODEL_MISSING` (so is one
+   that exists but cannot be read, with a `detail` that says so).
 3. **Inference.** beat-this (the `beat-this` crate, pure-Rust `rten` runtime) resamples to
    22 050 Hz, computes the log-mel spectrogram and runs the transformer over 30 s chunks. It
    returns beat times and downbeat times on a 20 ms frame grid; each beat keeps that frame's
@@ -243,8 +255,10 @@ The pipeline is fixed, and a stored result can be reproduced from `params` and `
    by more than 2 ms (twice the envelope's ~1 ms resolution); otherwise the segment keeps the
    model's times and reports `refinement: "skipped"`. The beats are then put back in time order, clamped to
    `[0, durationSec]`, and a beat within 1 ms of the one before it is dropped. The numbers are
-   reported in `refinement`; a silent input or `--no-refine` leaves `applied` false and adds
-   `REFINE_SKIPPED`.
+   reported in `refinement`; `--no-refine`, or an input whose audio has no attack to refine
+   against, leaves `applied` false and adds `REFINE_SKIPPED`. An input with nothing for the model to
+   follow (digital silence, a constant tone) does not get that far: the model reports fewer than two
+   beats and the run fails with `ANALYSIS_FAILED` (exit code 5, no analysis JSON).
 5. **Tempo map.** The interval between two beats is divided by the number of beats it spans
    (`round(gap / period)`, against the median of the intervals on the side that interval agrees
    with), so a breakdown where the model reported no beat is not read as one very long beat and a

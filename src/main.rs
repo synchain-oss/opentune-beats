@@ -15,6 +15,7 @@ mod wav;
 
 use std::ffi::OsString;
 use std::io::{self, Write};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -313,6 +314,15 @@ fn run<I: IntoIterator<Item = OsString>>(args: I) -> (u8, String, String) {
 /// Runs the command. The last element is true when it was an `analyze` command (a failed parse
 /// is not one), which decides the exit code when stdout cannot be written.
 fn run_command<I: IntoIterator<Item = OsString>>(args: I) -> (u8, String, String, bool) {
+    run_command_with(args, run_analyze)
+}
+
+/// `run_command` with the analysis supplied by the caller, so a test can make it panic.
+fn run_command_with<I, F>(args: I, analyze: F) -> (u8, String, String, bool)
+where
+    I: IntoIterator<Item = OsString>,
+    F: FnOnce(&AnalyzeOptions) -> (u8, String, String),
+{
     let args: Vec<OsString> = args.into_iter().collect();
     let command = match parse(&args) {
         Ok(command) => command,
@@ -339,7 +349,7 @@ fn run_command<I: IntoIterator<Item = OsString>>(args: I) -> (u8, String, String
         }
         Command::VersionJson => (EXIT_OK, version_json(), String::new(), false),
         Command::Analyze(options) => {
-            let (code, stdout, stderr) = run_analyze(&options);
+            let (code, stdout, stderr) = guard_analysis(options.pretty, || analyze(&options));
             (code, stdout, stderr, true)
         }
     }
@@ -368,6 +378,62 @@ fn run_analyze(options: &AnalyzeOptions) -> (u8, String, String) {
     }
 }
 
+/// The `detail` of the error a panic during the analysis becomes. It is a fixed sentence: the
+/// panic message may name a path or a value the user typed, so it goes to stderr only.
+const PANIC_DETAIL: &str = "the analysis stopped on an internal error";
+
+/// Runs the analysis and turns a panic inside it into an `ANALYSIS_FAILED` result (exit code 5).
+///
+/// The audio decoder, the post-processing and the inference runtime handle untrusted input, and a
+/// panic in any of them, the third-party crates included, must not end the process without the
+/// error JSON the contract promises (`docs/output.md`, section 3). This relies on the unwinding
+/// panic strategy, which is the release profile's default: `panic = "abort"` would bypass the
+/// catch (see the comment in `Cargo.toml`). The panic hook installed by `install_panic_hook` has
+/// already written the one-line explanation to stderr by the time this returns.
+fn guard_analysis<F>(pretty: bool, analysis: F) -> (u8, String, String)
+where
+    F: FnOnce() -> (u8, String, String),
+{
+    match panic::catch_unwind(AssertUnwindSafe(analysis)) {
+        Ok(result) => result,
+        Err(_) => {
+            let json = error_json("ANALYSIS_FAILED", PANIC_DETAIL, pretty);
+            let log = format!("{name}: {PANIC_DETAIL}\n", name = NAME);
+            (EXIT_ANALYSIS_FAILURE, json, log)
+        }
+    }
+}
+
+/// The text of a panic payload, when it is a string (what `panic!` with a message produces).
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        text
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text
+    } else {
+        "non-text panic payload"
+    }
+}
+
+/// Replaces the default panic hook, which prints several lines and a backtrace hint, with one
+/// line on stderr. Nothing is written to stdout: that stream carries the JSON and nothing else.
+fn install_panic_hook() {
+    panic::set_hook(Box::new(|info| {
+        let message = panic_message(info.payload()).replace(['\r', '\n'], " ");
+        let place = match info.location() {
+            Some(location) => format!(" at {}:{}", location.file(), location.line()),
+            None => String::new(),
+        };
+        // Ignoring the result on purpose: a panic hook that panics aborts the process, and a
+        // closed stderr must not turn the guarded failure into one.
+        let _ = writeln!(
+            io::stderr().lock(),
+            "{name}: internal error: {message}{place}",
+            name = NAME
+        );
+    }));
+}
+
 /// The exit code when stdout could not be written. Only an analysis that would have succeeded
 /// becomes 5: its result was lost and the caller must know. A run that already failed keeps its
 /// code, and `version`, `--version` and `--help` keep their 0 (`docs/output.md`, section 3).
@@ -380,6 +446,7 @@ fn exit_after_write_failure(code: u8, analysis: bool) -> u8 {
 }
 
 fn main() -> ExitCode {
+    install_panic_hook();
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let (mut code, stdout, mut stderr, analysis) = run_command(args);
     if !stdout.is_empty() {
@@ -680,6 +747,67 @@ mod tests {
             let (_, _, _, marked) = run_command(args);
             assert_eq!(marked, analysis, "{line}");
         }
+    }
+
+    #[test]
+    fn a_panic_during_the_analysis_is_exit_five_with_an_error_json() {
+        let args: Vec<OsString> = ["analyze", "take1.wav"]
+            .iter()
+            .copied()
+            .map(OsString::from)
+            .collect();
+        let (code, stdout, stderr, analysis) =
+            run_command_with(args, |_| panic!("boom from a dependency: take1.wav"));
+        assert_eq!(code, EXIT_ANALYSIS_FAILURE);
+        assert_eq!(code, 5);
+        assert!(
+            analysis,
+            "the run is an analysis, so a lost stdout stays exit 5"
+        );
+        // One line, the same shape as every other failure (docs/output.md, section 3).
+        assert_eq!(stdout, error_json("ANALYSIS_FAILED", PANIC_DETAIL, false));
+        assert_eq!(stdout.lines().count(), 1);
+        assert!(stdout.starts_with("{\"schemaVersion\":1,\"error\":{\"code\":\"ANALYSIS_FAILED\","));
+        assert!(stdout.ends_with("\"}}\n"));
+        // The panic message names a value the user typed: it must stay out of stdout.
+        assert!(!stdout.contains("boom"));
+        assert!(!stdout.contains("take1"));
+        assert!(stderr.starts_with("opentune-beats: "));
+        assert!(!stderr.is_empty());
+    }
+
+    #[test]
+    fn a_panic_error_follows_the_pretty_flag() {
+        let compact = guard_analysis(false, || panic!("boom"));
+        let pretty = guard_analysis(true, || panic!("boom"));
+        assert_eq!(compact.0, 5);
+        assert_eq!(pretty.0, 5);
+        assert_eq!(
+            compact.1,
+            error_json("ANALYSIS_FAILED", PANIC_DETAIL, false)
+        );
+        assert_eq!(pretty.1, error_json("ANALYSIS_FAILED", PANIC_DETAIL, true));
+        assert!(pretty.1.contains("\n  \"error\": {\n"));
+    }
+
+    #[test]
+    fn a_panic_with_a_non_text_payload_is_caught_too() {
+        let (code, stdout, _) = guard_analysis(false, || std::panic::panic_any(42u32));
+        assert_eq!(code, 5);
+        assert!(stdout.contains("\"code\":\"ANALYSIS_FAILED\""));
+    }
+
+    #[test]
+    fn an_analysis_that_does_not_panic_passes_through_unchanged() {
+        let result = guard_analysis(false, || (4, "out".to_string(), "err".to_string()));
+        assert_eq!(result, (4, "out".to_string(), "err".to_string()));
+    }
+
+    #[test]
+    fn panic_messages_are_read_from_str_and_string_payloads() {
+        assert_eq!(panic_message(&"static text"), "static text");
+        assert_eq!(panic_message(&String::from("owned text")), "owned text");
+        assert_eq!(panic_message(&42u32), "non-text panic payload");
     }
 
     #[test]

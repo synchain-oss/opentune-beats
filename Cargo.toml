@@ -24,6 +24,10 @@ path = "src/main.rs"
 [dependencies]
 beat-this = { version = "=1.1.0", default-features = false }
 
+# The release profile keeps the default `panic = "unwind"` on purpose, and must not be changed to
+# `"abort"`: `main.rs` catches a panic in the analysis (the decoder, the post-processing or a
+# third-party crate) with `catch_unwind` and turns it into the contract's `ANALYSIS_FAILED` error
+# JSON and exit code 5. With `panic = "abort"` the process would end without any JSON.
 [profile.release]
 codegen-units = 1
 lto = "thin"
