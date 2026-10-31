@@ -7,7 +7,8 @@ It is the beat-grid engine behind the `beat-grid` skill of
 measures the tempo of a backing track section by section, then uses it to tighten the timing
 of a vocal in OpenTune.
 
-> **Status:** in development. There is no release yet.
+> **Status:** early release (0.1.0). The binaries and the model files are on the
+> [Releases](https://github.com/synchain-oss/opentune-beats/releases) page.
 
 [中文说明](README.zh-CN.md)
 
