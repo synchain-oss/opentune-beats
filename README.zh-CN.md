@@ -5,7 +5,7 @@
 它是 [OpenTune MCP Server](https://github.com/synchain-oss/opentune-mcp-server) 里 `beat-grid`
 skill 的节拍网格引擎。AI 助手用它按段落测出伴奏的速度，再据此在 OpenTune 里修正人声的节奏。
 
-> **状态：** 开发中，尚未发布。
+> **状态：** 早期版本（0.1.0）。二进制和模型文件在 [Releases](https://github.com/synchain-oss/opentune-beats/releases) 页面。
 
 [English](README.md)
 

@@ -208,7 +208,7 @@ against.
 
 This section documents the contract that the release workflow
 ([`.github/workflows/release.yml`](../.github/workflows/release.yml), described in
-[RELEASE.md](./RELEASE.md)) implements; no release has been published yet.
+[RELEASE.md](./RELEASE.md)) implements.
 
 | Asset | Contents |
 | --- | --- |
